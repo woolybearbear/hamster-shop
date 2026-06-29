@@ -1,0 +1,2376 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>倉鼠用品團購選物</title>
+
+  <!-- React -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import * as Firestore from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    window.FirebaseApp = { initializeApp };
+    window.FirebaseFirestore = Firestore;
+    window.__firebaseReady = true;
+    window.dispatchEvent(new Event("firebaseReady"));
+  </script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #FEFEF2; }
+    #loading {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #FEFEF2; z-index: 9999;
+      font-family: sans-serif; gap: 14px;
+    }
+    #loading .spinner {
+      width: 36px; height: 36px; border-radius: 50%;
+      border: 3px solid #EFA8A8; border-top-color: transparent;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <span style="color:#6E6560;font-size:14px;">載入中…</span>
+  </div>
+  <div id="root"></div>
+
+  <script>
+    // 等 Firebase module 載入完成再啟動 React
+    function startApp() {
+      if (!window.__firebaseReady) {
+        window.addEventListener("firebaseReady", startApp, { once: true });
+        return;
+      }
+      document.getElementById("loading").style.display = "none";
+      // Babel 轉譯完後渲染
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(React.createElement(window.__App));
+    }
+    window.addEventListener("load", startApp);
+  </script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect } = React;
+
+
+
+/* ══════════════════════════════════════════
+   DESIGN TOKENS
+══════════════════════════════════════════ */
+const C = {
+  bg:          "#FEFEF2",   // 主背景：淡鵝黃
+  card:        "#FFFFFF",   // 卡片純白
+  ink:         "#3A3530",   // 主文字：溫暖深棕（可讀性高）
+  inkSoft:     "#6E6560",   // 次要文字
+  inkMuted:    "#A89E98",   // 弱化文字／placeholder
+
+  // 主色：霧霾藍（從淡藍 #DEF3FC 取深版）
+  forest:      "#5AACCF",   // 主色按鈕、active 狀態
+  forestDark:  "#3D8FB3",   // hover / shadow
+
+  // 強調色：柔粉（從淡粉 #FFEBEB 取深版）
+  ham:         "#EFA8A8",   // 購物車、價格、強調按鈕
+  hamDark:     "#D98888",
+  hamLight:    "#FFEBEB",   // 淡粉底色（直接用提供的色）
+  hamMid:      "#F7D0D0",
+
+  // 成功 / 完成狀態：沿用淡藍
+  leaf:        "#5AACCF",
+  leafLight:   "#DEF3FC",   // 直接用提供的淡藍
+
+  warn:        "#C49A3A",   warnLight: "#FEF8E7",
+  danger:      "#C45A5A",   dangerLight: "#FFEBEB",
+  line:        "#E8E8DC",   // 邊框：淡黃灰，與背景同調
+  stamp:       "#C45A5A",
+};
+const SERIF = "'Noto Serif TC', serif";
+const SANS  = "'Noto Sans TC', sans-serif";
+
+/* ══════════════════════════════════════════
+   DEFAULT SETTINGS (店家後台可修改全部)
+══════════════════════════════════════════ */
+const DEFAULT_SETTINGS = {
+  /* 基本資訊 */
+  shopName:    "倉鼠用品團購選物",
+  tagline:     "社群團Go！優惠多更多！",
+  shopEmoji:   "",
+  adminPin:    "123456",
+
+  /* 頁頭 */
+  headerAnnouncement: " 本週新品上架！現在下單享優惠！",
+  showAnnouncement:   true,
+
+  /* Hero Banner */
+  heroBadge:    "本週特惠",
+  heroTitle:    "倉鼠用品\n限量團購中",
+  heroPrice:    "",
+  heroOrigPrice:"",
+  heroImg:      "",
+
+  /* 購物須知 */
+  notice: `歡迎參加倉鼠用品團購選物！下單前請詳閱以下須知：
+
+1. 截止時間：本團購於 2025/07/31 晚上 11:59 截止收單，截止後不接受補單。
+
+2. 付款方式：下單後請於 24 小時內完成銀行轉帳或 Line Pay，逾時訂單將取消。付款後請於 Line 群組上傳轉帳截圖。
+
+3. 出貨時間：預計 8/10 起陸續出貨。宅配酌收 NT$100 運費，面交地點另以 Line 約定。
+
+4. 退換貨規定：商品如有明顯瑕疵，請於收到後 3 天內拍照告知。飼料類食品因衛生考量，一律不接受退換。
+
+5. 注意事項：商品圖片僅供參考，實際顏色以實品為準。庫存有限，售完為止。
+
+如有任何問題，請直接在 Line 群組留言，我們會儘快回覆。`,
+
+  /* 取貨 & 付款選項 */
+  pickupOptions: ["面交取貨", "超商取貨", "宅配到府", "現場自取"],
+  payOptions:    ["銀行轉帳", "Line Pay"],
+
+  /* 聯絡資訊（頁尾） */
+  lineId:        "@399imwfk",
+  lineGroupUrl:  "https://line.me/ti/g2/t8txrQ3MkzO2hA101hw1Q82eApRlc98Pnbbo5w?utm_source=invitation&utm_medium=link_copy&utm_campaign=default",
+  phone:         "0971-759-068",
+  email:         "wooly2025@gmail.com",
+  address:       "新北市新莊區萬安街67巷3號",
+  businessHours: "週一至週六 10:00–20:00",
+
+  /* 社群連結（頁尾） */
+  igUrl:    "https://www.instagram.com/wooly._bear?igsh=MTVudDdwcHNjYjBkMQ%3D%3D&utm_source=qr",
+  fbUrl:    "",
+  igHandle: "@wooly._bear",
+  fbHandle: "",
+
+  /* 頁尾條款文字 */
+  footerAbout:  "倉鼠用品團購選物是專為倉鼠愛好者打造的社區團購平台，精選優質飼料、籠具與玩具，讓每隻倉鼠都能過上幸福生活。",
+  copyrightText:"© 2025 倉鼠用品團購選物. All rights reserved.",
+  privacyText:  "本網站所有交易資訊僅供訂單處理使用，不會分享給第三方。",
+
+  /* 政策頁面內容 */
+  policyNotice: `購物須知
+
+1. 截止時間
+本團購於公告時間截止收單，截止後不接受補單，請把握時間下單。
+
+2. 付款期限
+下單後請於 24 小時內完成銀行轉帳或 Line Pay 付款，逾時訂單將自動取消。付款後請於 Line 社群上傳轉帳截圖供核對。
+
+3. 出貨時間
+商品於團購截止並確認付款後統一出貨，實際出貨日期以公告為準，如有異動將另行通知。
+
+4. 商品說明
+商品圖片僅供參考，實際顏色、尺寸以實品為準。庫存有限，下單不保證取得，售完為止。
+
+5. 其他
+如有任何疑問，歡迎於 Line 社群留言，我們將盡快回覆。`,
+
+  policyReturn: `退貨政策
+
+1. 退換貨條件
+商品如有明顯品質瑕疵或寄送錯誤，請於收到商品後 3 天內拍照留存並於 Line 社群告知，我們將協助處理。
+
+2. 不接受退換的情況
+• 飼料、食品類商品：因衛生安全考量，一經開封一律不接受退換。
+• 人為損壞或使用後的商品。
+• 超過 3 天未告知的瑕疵申請。
+• 因個人喜好因素要求退換。
+
+3. 退換貨流程
+請先於 Line 社群告知，附上商品照片與訂單編號，確認後由我們通知後續處理方式。
+
+4. 退款方式
+確認退貨後，退款將以原付款方式退回，處理時間約 3-5 個工作日。`,
+
+  policyPrivacy: `隱私權政策
+
+1. 資料蒐集範圍
+本平台於您下單時蒐集之個人資料包含：姓名、聯絡電話、Line ID、Line 社群暱稱及取貨相關資訊。
+
+2. 資料使用目的
+所蒐集之個人資料僅用於訂單處理、付款確認、出貨通知及客服聯繫等目的，不作其他商業用途。
+
+3. 資料保護
+您的個人資料將妥善保管，未經您的同意，不會提供給任何第三方，法律另有規定者除外。
+
+4. 資料保存期限
+訂單相關資料於交易完成後保存至多一年，期滿後將予以刪除。
+
+5. 您的權利
+您得隨時要求查詢、更正或刪除您的個人資料，請於 Line 社群聯繫我們。`,
+
+  policyShipping: `運送說明
+
+1. 運送方式
+本店採用賣貨便超商取貨付款服務，支援全台 7-ELEVEN、全家、萊爾富、OK 超商取貨。
+
+2. 運費說明
+• 標準運費：NT$38（超商代收手續費另計 NT$20，取貨時付現）
+• 免運優惠：單筆訂單商品合計滿 NT$500，免收運費 NT$38（超商代收手續費 NT$20 仍需取貨時付現）
+
+3. 貨到付款說明
+選擇超商取貨時，取貨時須以現金支付超商 NT$58（運費 NT$38 + 代收手續費 NT$20）。達免運資格者，NT$38 運費已從匯款金額折抵，取貨時仍須付現 NT$58 給超商。
+
+4. 出貨時間
+團購截止並確認付款後統一出貨，預計出貨日期以各團購公告為準。
+
+5. 取貨期限
+超商到貨簡訊通知後，請於 7 天內完成取貨，逾期商品將被退回，恕不退款。
+
+6. 注意事項
+• 請確認取貨門市與聯絡電話正確，以免影響配送。
+• 取貨時請核對商品內容，若有異常請當場拍照並聯繫我們。`,
+
+  /* 銀行帳號（頁尾付款資訊） */
+  bankName:    "玉山銀行",
+  bankAccount: "808-123456789012",
+  bankHolder:  "陳小倉",
+
+  /* 付款設定 */
+  linePayUrl:          "https://line.me/R/pay",   // Line Pay 付款連結
+  freeShippingThreshold: 500,                       // 滿額免運門檻（NT$）
+  shippingFee:           38,                        // 免運折扣金額（運費）
+  codFee:                20,                        // 超商代收手續費
+};
+
+/* ══════════════════════════════════════════
+   INITIAL PRODUCTS
+══════════════════════════════════════════ */
+const INIT_PRODUCTS = [];
+
+const INIT_CATS = [
+  { id: "all", label: "全部商品" },
+];
+
+/* ══════════════════════════════════════════
+   HELPERS
+══════════════════════════════════════════ */
+function money(n) { return "NT$" + Number(n).toLocaleString(); }
+function uid()    { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+
+/* ══════════════════════════════════════════
+   SHARED UI COMPONENTS
+══════════════════════════════════════════ */
+function TagCard({ children, style = {}, onClick }) {
+  return (
+    <div onClick={onClick} style={{
+      position: "relative", borderRadius: 20,
+      background: C.card, border: `1.5px solid ${C.line}`,
+      boxShadow: "0 2px 0 rgba(35,31,24,0.05)", ...style,
+    }}>
+      <div style={{
+        position: "absolute", top: -7, left: 20,
+        width: 14, height: 14, borderRadius: "50%",
+        background: C.bg, border: `1.5px solid ${C.line}`,
+      }} />
+      {children}
+    </div>
+  );
+}
+
+function Btn({ children, onClick, variant = "primary", disabled, type = "button", full, small }) {
+  const vs = {
+    primary: { background: C.forest, color: "#fff", border: "none" },
+    ham:     { background: C.ham,    color: "#fff", border: "none", boxShadow: `0 2px 0 ${C.hamDark}` },
+    danger:  { background: C.stamp,  color: "#fff", border: "none" },
+    ghost:   { background: "transparent", color: C.forest, border: `1.5px solid ${C.forest}` },
+    subtle:  { background: "#fff", color: C.ink, border: `1.5px solid ${C.line}` },
+    warn:    { background: C.warn, color: "#fff", border: "none" },
+  };
+  return (
+    <button type={type} onClick={onClick} disabled={disabled} style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+      padding: small ? "7px 14px" : "11px 22px",
+      borderRadius: 40, fontSize: small ? 12 : 14,
+      fontFamily: SANS, fontWeight: 700,
+      cursor: disabled ? "not-allowed" : "pointer",
+      opacity: disabled ? 0.4 : 1,
+      width: full ? "100%" : undefined,
+      transition: "opacity .15s",
+      ...vs[variant],
+    }}>{children}</button>
+  );
+}
+
+function PillTab({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: "7px 16px", borderRadius: 20, fontSize: 13,
+      fontFamily: SANS, fontWeight: active ? 700 : 400, whiteSpace: "nowrap",
+      border: active ? "none" : `1.5px solid ${C.line}`,
+      background: active ? C.ink : C.card,
+      color: active ? "#fff" : C.inkSoft,
+      cursor: "pointer", transition: "all .15s",
+    }}>{label}</button>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted,
+      letterSpacing: "0.6px", textTransform: "uppercase", padding: "10px 16px 6px" }}>
+      {children}
+    </div>
+  );
+}
+
+function FieldLabel({ children }) {
+  return (
+    <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkSoft,
+      letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 6 }}>
+      {children}
+    </div>
+  );
+}
+
+function Input({ value, onChange, placeholder, type = "text", multiline, rows = 4, style = {} }) {
+  const base = {
+    width: "100%", padding: "11px 14px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 14,
+    outline: "none", resize: "vertical", ...style,
+  };
+  return multiline
+    ? <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows} style={base} />
+    : <input type={type} value={value} onChange={onChange} placeholder={placeholder} style={base} />;
+}
+
+function Toggle({ checked, onChange, label }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+      <div onClick={() => onChange(!checked)} style={{
+        width: 44, height: 24, borderRadius: 12,
+        background: checked ? C.forest : C.line,
+        position: "relative", transition: "background .2s", flexShrink: 0,
+      }}>
+        <div style={{
+          position: "absolute", top: 3, left: checked ? 22 : 3,
+          width: 18, height: 18, borderRadius: "50%", background: "#fff",
+          transition: "left .2s",
+        }} />
+      </div>
+      {label && <span style={{ fontFamily: SANS, fontSize: 13, color: C.ink }}>{label}</span>}
+    </label>
+  );
+}
+
+/* ══════════════════════════════════════════
+   STOREFRONT HEADER (前台頁頭)
+══════════════════════════════════════════ */
+function StorefrontHeader({ settings, cartCount, onGoCart, onGoAdmin }) {
+  return (
+    <div style={{ background: C.card, borderBottom: `1.5px solid ${C.line}` }}>
+      {/* Announcement bar */}
+      {settings.showAnnouncement && settings.headerAnnouncement && (
+        <div style={{
+          background: "linear-gradient(90deg, #7EC8E3, #F0B8B8)", color: "#fff",
+          fontFamily: SANS, fontSize: 12, fontWeight: 700,
+          textAlign: "center", padding: "8px 16px", lineHeight: 1.5,
+        }}>
+          {settings.headerAnnouncement}
+        </div>
+      )}
+      {/* Main header */}
+      <div style={{
+        maxWidth: 480, margin: "0 auto",
+        padding: "14px 18px 12px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <div>
+            <div style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>{settings.shopName}</div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkSoft }}>{settings.tagline}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+
+          <button onClick={onGoCart} style={{
+            display: "flex", alignItems: "center", gap: 7,
+            background: C.ham, border: "none", color: "#fff",
+            padding: "8px 14px", borderRadius: 40, cursor: "pointer",
+            fontFamily: SANS, fontSize: 13, fontWeight: 700,
+            boxShadow: `0 2px 0 ${C.hamDark}`,
+          }}>
+            <span style={{ display: "flex", alignItems: "center" }} dangerouslySetInnerHTML={{ __html: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>` }} />
+            <span style={{
+              background: "rgba(255,255,255,.28)", width: 20, height: 20,
+              borderRadius: "50%", display: "flex", alignItems: "center",
+              justifyContent: "center", fontSize: 11, fontWeight: 700,
+            }}>{cartCount}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   STOREFRONT FOOTER (前台頁尾)
+══════════════════════════════════════════ */
+function StorefrontFooter({ settings, onPolicyClick, onGoAdmin }) {
+  const Row = ({ icon, children }) => (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 9 }}>
+      <span style={{
+        fontFamily: SANS, fontSize: 9, fontWeight: 700, letterSpacing: "0.6px",
+        color: "rgba(255,255,255,.35)", background: "rgba(255,255,255,.08)",
+        border: "1px solid rgba(255,255,255,.12)",
+        borderRadius: 4, padding: "2px 5px", flexShrink: 0, marginTop: 2,
+      }}>{icon}</span>
+      <span style={{ fontFamily: SANS, fontSize: 12, color: "rgba(255,255,255,.55)", lineHeight: 1.7 }}>{children}</span>
+    </div>
+  );
+  return (
+    <div style={{ background: C.ink, marginTop: 40 }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "28px 20px 16px" }}>
+        {/* Brand */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: "#fff" }}>{settings.shopName}</div>
+          <div style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{settings.tagline}</div>
+        </div>
+        <p style={{ fontFamily: SANS, fontSize: 12, color: "rgba(255,255,255,.5)", lineHeight: 1.7, marginBottom: 20 }}>
+          {settings.footerAbout}
+        </p>
+
+        <div style={{ borderTop: "1px solid rgba(255,255,255,.1)", paddingTop: 18, marginBottom: 16 }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 12 }}>聯絡資訊</div>
+          <Row icon="">Line：{settings.lineId}</Row>
+          <Row icon="">{settings.phone}</Row>
+          <Row icon="">{settings.email}</Row>
+          <Row icon="">{settings.address}</Row>
+          <Row icon="">{settings.businessHours}</Row>
+        </div>
+
+        <div style={{ borderTop: "1px solid rgba(255,255,255,.1)", paddingTop: 18, marginBottom: 20 }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 12 }}>社群</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {settings.igHandle && (
+              <a href={settings.igUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 12, padding: "10px 14px" }}>
+                <div style={{ width: 32, height: 32, borderRadius: 10, background: "linear-gradient(135deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} dangerouslySetInnerHTML={{ __html: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="#fff" stroke="none"/></svg>` }} />
+                <div>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 2 }}>Instagram</div>
+                  <div style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: "#fff" }}>{settings.igHandle}</div>
+                </div>
+                <div style={{ marginLeft: "auto", fontSize: 12, color: "rgba(255,255,255,.3)" }}>→</div>
+              </a>
+            )}
+            {settings.lineGroupUrl && (
+              <a href={settings.lineGroupUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 12, padding: "10px 14px" }}>
+                <div style={{ width: 32, height: 32, borderRadius: 10, background: "#00B900", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} dangerouslySetInnerHTML={{ __html: `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M12 2C6.48 2 2 5.92 2 10.72c0 3.2 1.88 6.01 4.72 7.67-.17.6-.65 2.18-.75 2.52-.12.42.15.42.32.31.13-.09 1.73-1.17 2.43-1.64.73.1 1.48.15 2.28.15 5.52 0 10-3.92 10-8.72C22 5.92 17.52 2 12 2z"/></svg>` }} />
+                <div>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 2 }}>Line 社群</div>
+                  <div style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: "#fff" }}>加入我們的社群</div>
+                </div>
+                <div style={{ marginLeft: "auto", fontSize: 12, color: "rgba(255,255,255,.3)" }}>→</div>
+              </a>
+            )}
+          </div>
+        </div>
+
+        {/* 政策連結列 + 店家後台 */}
+        <div style={{ borderTop: "1px solid rgba(255,255,255,.1)", paddingTop: 16, marginBottom: 14 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px", marginBottom: 14 }}>
+            {[
+              { key: "policyNotice",   label: "購物須知" },
+              { key: "policyReturn",   label: "退貨政策" },
+              { key: "policyPrivacy",  label: "隱私權政策" },
+              { key: "policyShipping", label: "運送說明" },
+            ].map(p => (
+              <button key={p.key} onClick={() => onPolicyClick(p.key)} style={{
+                background: "none", border: "none", cursor: "pointer",
+                fontFamily: SANS, fontSize: 12, color: "rgba(255,255,255,.5)",
+                padding: 0, textDecoration: "underline", transition: "color .15s",
+              }}
+              onMouseEnter={e => e.target.style.color = "rgba(255,255,255,.85)"}
+              onMouseLeave={e => e.target.style.color = "rgba(255,255,255,.5)"}
+              >{p.label}</button>
+            ))}
+
+            {/* 店家後台入口 — 緊接在運送說明旁，框起來區隔 */}
+            <button onClick={onGoAdmin} style={{
+              background: "none", cursor: "pointer", fontFamily: SANS,
+              fontSize: 12, color: "rgba(255,255,255,.4)",
+              border: "1px solid rgba(255,255,255,.2)",
+              borderRadius: 6, padding: "2px 10px",
+              transition: "all .15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = "rgba(255,255,255,.8)"; e.currentTarget.style.borderColor = "rgba(255,255,255,.5)"; }}
+            onMouseLeave={e => { e.currentTarget.style.color = "rgba(255,255,255,.4)"; e.currentTarget.style.borderColor = "rgba(255,255,255,.2)"; }}
+            >店家後台</button>
+          </div>
+        </div>
+
+        <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 14 }}>
+          <p style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.3)", lineHeight: 1.6, marginBottom: 4 }}>{settings.privacyText}</p>
+          <p style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.25)" }}>{settings.copyrightText}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   POLICY PAGE  — 政策內頁
+══════════════════════════════════════════ */
+const POLICIES = [
+  { key: "policyNotice",   title: "購物須知",   icon: "" },
+  { key: "policyReturn",   title: "退貨政策",   icon: "" },
+  { key: "policyPrivacy",  title: "隱私權政策", icon: "" },
+  { key: "policyShipping", title: "運送說明",   icon: "" },
+];
+
+function PolicyPage({ settings, policyKey, onBack }) {
+  const policy = POLICIES.find(p => p.key === policyKey);
+  return (
+    <div>
+      <StorefrontHeader settings={settings} cartCount={0} onGoCart={() => {}} onGoAdmin={() => {}} />
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "20px 16px 60px" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 4 }}>
+          ← 返回
+        </button>
+        <div style={{ marginBottom: 20 }}>
+          <h1 style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: C.ink, margin: 0 }}>{policy?.title}</h1>
+        </div>
+        <TagCard style={{ padding: 20 }}>
+          <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, lineHeight: 2, whiteSpace: "pre-wrap" }}>
+            {settings[policyKey]}
+          </div>
+        </TagCard>
+        <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, textAlign: "center", marginTop: 20, lineHeight: 1.6 }}>
+          如有任何疑問，歡迎透過 Line 社群聯繫我們
+        </p>
+      </div>
+      <StorefrontFooter settings={settings} onPolicyClick={() => {}} onGoAdmin={() => {}} />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   NOTICE GATE
+══════════════════════════════════════════ */
+function NoticeGate({ settings, onAgree, onGoAdmin, onPolicyClick }) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <div>
+      <StorefrontHeader settings={settings} cartCount={0} onGoCart={() => {}} onGoAdmin={onGoAdmin} />
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "24px 16px 0" }}>
+        <TagCard style={{ padding: 24, display: "flex", flexDirection: "column" }}>
+          <div style={{ marginBottom: 16 }}>
+            <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>購物前請閱讀須知</span>
+          </div>
+          <div style={{ fontSize: 13, lineHeight: 1.8, color: C.inkSoft, fontFamily: SANS,
+            whiteSpace: "pre-wrap", maxHeight: "46vh", overflowY: "auto", paddingRight: 4 }}>
+            {settings.notice}
+          </div>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 10, marginTop: 20,
+            paddingTop: 18, borderTop: `1.5px solid ${C.line}`, cursor: "pointer" }}>
+            <div onClick={() => setChecked(v => !v)} style={{
+              width: 22, height: 22, borderRadius: 7, flexShrink: 0, marginTop: 1,
+              border: `2px solid ${checked ? C.forest : C.inkMuted}`,
+              background: checked ? C.forest : "#fff",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              transition: "all .15s",
+            }}>
+              {checked && <span style={{ color: "#fff", fontSize: 13, fontWeight: 900, lineHeight: 1 }}></span>}
+            </div>
+            <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ink, lineHeight: 1.6 }}>
+              我已詳細閱讀以上購物須知，同意遵守相關規定並繼續下單
+            </span>
+          </label>
+          <div style={{ marginTop: 14 }}>
+            <Btn variant="primary" onClick={onAgree} disabled={!checked} full>進入下單頁面 →</Btn>
+          </div>
+        </TagCard>
+      </div>
+      <StorefrontFooter settings={settings} onPolicyClick={onPolicyClick} onGoAdmin={onGoAdmin} />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   SHOP HOME
+══════════════════════════════════════════ */
+function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, onGoCart, onGoAdmin, onPolicyClick }) {
+  const [cat, setCat] = useState("all");
+  const [detailId, setDetailId] = useState(null);
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+  const filtered = cat === "all" ? products : products.filter(p => p.cat === cat);
+
+  if (detailId) {
+    const p = products.find(x => x.id == detailId);
+    if (p) return (
+      <ProductDetail
+        settings={settings}
+        product={p}
+        qty={cart[p.id] || 0}
+        onAdd={() => onAddToCart(p.id)}
+        onChangeQty={onChangeQty}
+        onBack={() => setDetailId(null)}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={onGoCart} onGoAdmin={onGoAdmin} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 100 }}>
+        {/* Hero */}
+        <div style={{
+          margin: "14px 14px 0", borderRadius: 20,
+          border: "none", position: "relative", overflow: "hidden",
+          minHeight: 140,
+          background: settings.heroImg
+            ? `url(${settings.heroImg}) center/cover no-repeat`
+            : "linear-gradient(135deg, #5AACCF 0%, #3D8FB3 100%)",
+        }}>
+          {/* 圖片時加暗色遮罩 */}
+          {settings.heroImg && (
+            <div style={{ position: "absolute", inset: 0, background: "rgba(20,12,4,.52)", borderRadius: 18 }} />
+          )}
+          <div style={{ position: "relative", zIndex: 1, padding: "22px 22px 18px" }}>
+            {settings.heroBadge && (
+              <div style={{ display: "inline-block", background: C.ham, color: "#fff",
+                fontSize: 11, fontWeight: 700, fontFamily: SANS, padding: "3px 10px",
+                borderRadius: 10, marginBottom: 10, boxShadow: `0 2px 0 ${C.hamDark}` }}>
+                {settings.heroBadge}
+              </div>
+            )}
+            <div style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: "#fff", lineHeight: 1.45, marginBottom: 8, whiteSpace: "pre-line" }}>
+              {settings.heroTitle}
+            </div>
+            {settings.heroPrice && (
+              <div>
+                <span style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 900, color: C.hamMid }}>NT${settings.heroPrice}</span>
+                {settings.heroOrigPrice && (
+                  <span style={{ fontFamily: SANS, fontSize: 13, color: "rgba(255,255,255,.4)", textDecoration: "line-through", marginLeft: 10 }}>NT${settings.heroOrigPrice}</span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Cats */}
+        <div style={{ display: "flex", gap: 8, padding: "14px 14px 6px", overflowX: "auto" }}>
+          {cats.map(c => <PillTab key={c.id} label={c.label} active={cat === c.id} onClick={() => setCat(c.id)} />)}
+        </div>
+
+        <SectionLabel>商品列表</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: "0 14px" }}>
+          {filtered.map(p => (
+            <ProductCard key={p.id} product={p} qty={cart[p.id] || 0} onAdd={() => onAddToCart(p.id)} onDetail={() => setDetailId(p.id)} />
+          ))}
+        </div>
+      </div>
+      <StorefrontFooter settings={settings} onPolicyClick={onPolicyClick} onGoAdmin={onGoAdmin} />
+    </div>
+  );
+}
+
+function ProductCard({ product: p, qty, onAdd, onDetail }) {
+  return (
+    <TagCard style={{ overflow: "hidden", cursor: "pointer" }} onClick={onDetail}>
+      <div style={{ aspectRatio: "1", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 52, position: "relative", overflow: "hidden" }}>
+        {p.img
+          ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          : <span>{p.em}</span>}
+        {qty > 0 && (
+          <div style={{ position: "absolute", top: 8, right: 8, background: C.ham, color: "#fff",
+            fontSize: 11, fontWeight: 700, width: 22, height: 22, borderRadius: "50%",
+            display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SANS }}>{qty}</div>
+        )}
+        {p.desc && (
+          <div style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,.35)", borderRadius: 20, padding: "2px 7px" }}>
+            <span style={{ fontFamily: SANS, fontSize: 10, color: "#fff" }}>詳情</span>
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "10px 12px 12px" }}>
+        <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 2, lineHeight: 1.35 }}>{p.name}</div>
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 8 }}>{p.unit}</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            {p.groupPrice > 0 ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: "#fff", background: C.ham, borderRadius: 6, padding: "1px 5px" }}>團購價</span>
+                  <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ham }}>{money(p.groupPrice)}</span>
+                </div>
+                <div style={{ fontFamily: SANS, fontSize: 10, color: C.inkMuted, textDecoration: "line-through", marginTop: 1 }}>{money(p.price)}</div>
+              </>
+            ) : (
+              <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ham }}>{money(p.price)}</span>
+            )}
+          </div>
+          {p.stock > 0
+            ? <button onClick={e => { e.stopPropagation(); onAdd(); }} style={{ width: 30, height: 30, borderRadius: "50%", background: C.ham, border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 0 ${C.hamDark}` }}>+</button>
+            : <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.danger }}>缺貨</span>
+          }
+        </div>
+      </div>
+    </TagCard>
+  );
+}
+
+
+/* ══════════════════════════════════════════
+   PRODUCT DETAIL PAGE
+══════════════════════════════════════════ */
+function ProductDetail({ settings, product: p, qty, onAdd, onChangeQty, onBack }) {
+  return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={qty} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 120 }}>
+        {/* Back */}
+        <div style={{ padding: "14px 16px 0" }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}>
+            ← 返回商品列表
+          </button>
+        </div>
+
+        {/* 商品圖 */}
+        <div style={{ margin: "12px 14px 0", borderRadius: 20, overflow: "hidden", border: `1.5px solid ${C.line}`, aspectRatio: "1", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 80 }}>
+          {p.img
+            ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span>{p.em}</span>}
+        </div>
+
+        {/* 商品基本資訊 */}
+        <div style={{ padding: "18px 18px 0" }}>
+          <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink, lineHeight: 1.3, marginBottom: 4 }}>{p.name}</div>
+          {p.unit && <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkMuted, marginBottom: 12 }}>{p.unit}</div>}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            {p.groupPrice > 0 ? (
+              <>
+                <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: "#fff", background: C.ham, borderRadius: 8, padding: "2px 8px", alignSelf: "center" }}>團購價</span>
+                <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(p.groupPrice)}</span>
+                <span style={{ fontFamily: SANS, fontSize: 15, color: C.inkMuted, textDecoration: "line-through" }}>{money(p.price)}</span>
+              </>
+            ) : (
+              <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(p.price)}</span>
+            )}
+          </div>
+
+          {/* 庫存狀態 */}
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 20, marginBottom: 20,
+            background: p.stock > 0 ? C.leafLight : C.dangerLight,
+            border: `1px solid ${p.stock > 0 ? C.leaf : C.danger}40`,
+          }}>
+            <div style={{ width: 7, height: 7, borderRadius: "50%", background: p.stock > 0 ? C.leaf : C.danger }} />
+            <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: p.stock > 0 ? C.leaf : C.danger }}>
+              {p.stock > 0 ? `尚有庫存 ${p.stock} 件` : "已售完"}
+            </span>
+          </div>
+
+          {/* 詳細說明 */}
+          {p.desc && (
+            <TagCard style={{ padding: 18, marginBottom: 16 }}>
+              <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 10 }}>商品說明</div>
+              <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, lineHeight: 2, whiteSpace: "pre-wrap" }}>{p.desc}</div>
+            </TagCard>
+          )}
+        </div>
+      </div>
+
+      {/* 底部加入購物車 */}
+      <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.card, borderTop: `1.5px solid ${C.line}`, padding: "14px 20px 28px", zIndex: 30 }}>
+        {p.stock > 0 ? (
+          qty > 0 ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.bg, borderRadius: 40, padding: "6px 14px", border: `1.5px solid ${C.line}` }}>
+                <button onClick={() => onChangeQty(p.id, -1)} style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: "#fff", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{qty}</span>
+                <button onClick={() => onChangeQty(p.id, 1)} style={{ width: 30, height: 30, borderRadius: "50%", background: C.ham, border: "none", color: "#fff", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 0 ${C.hamDark}` }}>+</button>
+              </div>
+              <Btn variant="ham" onClick={onAdd} full> 再加一件</Btn>
+            </div>
+          ) : (
+            <Btn variant="ham" onClick={onAdd} full> 加入購物車</Btn>
+          )
+        ) : (
+          <Btn variant="subtle" disabled full>已售完</Btn>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   CART
+══════════════════════════════════════════ */
+function CartScreen({ settings, products, cart, onBack, onGoCheckout, onChangeQty }) {
+  const keys = Object.keys(cart).filter(k => cart[k] > 0);
+  const total = keys.reduce((acc, id) => { const p = products.find(x => x.id == id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+
+  return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 120 }}>
+        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 繼續選購</button>
+          <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>購物車</span>
+        </div>
+        {keys.length === 0
+          ? <div style={{ textAlign: "center", padding: "80px 20px" }}>
+              <div style={{ fontSize: 48, marginBottom: 14 }}></div>
+              <p style={{ fontFamily: SANS, color: C.inkSoft, fontSize: 14 }}>購物車是空的，回去挑選吧！</p>
+            </div>
+          : <div style={{ padding: "10px 14px" }}>
+              {keys.map(id => {
+                const p = products.find(x => x.id == id);
+                return (
+                  <TagCard key={id} style={{ padding: "14px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 14 }}>
+                    <div style={{ width: 52, height: 52, borderRadius: 10, overflow: "hidden", background: C.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {p.img
+                        ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        : <span style={{ fontSize: 32 }}>{p.em}</span>}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}</div>
+                      <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>{money(p.groupPrice > 0 ? p.groupPrice : p.price)} / 份</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                        <button onClick={() => onChangeQty(id, -1)} style={{ width: 28, height: 28, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: C.bg, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                        <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, minWidth: 22, textAlign: "center" }}>{cart[id]}</span>
+                        <button onClick={() => onChangeQty(id, 1)} style={{ width: 28, height: 28, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: C.bg, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+                        <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ham, marginLeft: "auto" }}>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+                      </div>
+                    </div>
+                  </TagCard>
+                );
+              })}
+            </div>
+        }
+      </div>
+      {keys.length > 0 && (
+        <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.card, borderTop: `1.5px solid ${C.line}`, padding: "14px 20px 24px", zIndex: 30 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+            <span style={{ fontFamily: SANS, fontSize: 14, color: C.inkSoft }}>合計</span>
+            <span style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink }}>{money(total)}</span>
+          </div>
+          <Btn variant="ham" onClick={onGoCheckout} full>前往結帳 →</Btn>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   CHECKOUT  — 付款流程整合版
+══════════════════════════════════════════ */
+function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
+  const keys = Object.keys(cart).filter(k => cart[k] > 0);
+  const subtotal  = keys.reduce((acc, id) => { const p = products.find(x => x.id == id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+
+  const [form, setForm] = useState({
+    name: "", phone: "", lineId: "", lineName: "",
+    pickup: settings.pickupOptions[0] || "",
+    pay: settings.payOptions[0] || "",
+    note: "",
+  });
+  const [step, setStep] = useState("form");  // "form" | "payment"
+  const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  const isConvenience  = form.pickup === "超商取貨";
+  const freeThreshold  = Number(settings.freeShippingThreshold) || 500;
+  const COD_TOTAL      = 58;   // 賣貨便固定：$20 代收費 + $38 運費，取貨時一律付此金額
+  const isFreeShipping = subtotal >= freeThreshold;
+
+  // 匯款金額邏輯：
+  // 超商取貨時，代收費 $20 一律從匯款扣除（賣貨便規定）
+  // 未達免運 → 匯款 = 商品小計 - $20（運費 $38 取貨時付；代收費 $20 預扣）
+  // 已達免運 → 匯款 = 商品小計 - $58（運費 $38 + 代收費 $20 全折抵；取貨仍付現 $58）
+  const COD_FEE = 20;
+  const payNow = isConvenience
+    ? isFreeShipping
+      ? subtotal - COD_TOTAL
+      : subtotal - COD_FEE
+    : subtotal;
+
+  const inputSt = {
+    width: "100%", padding: "11px 14px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 14, outline: "none",
+  };
+
+  const handleConfirm = () => {
+    if (!form.name.trim() || !form.phone.trim() || !form.lineName.trim()) return;
+    if (form.pay === "Line Pay") {
+      // 直接導向 Line Pay，同時記訂單
+      onPlaceOrder({ ...form, payNow, subtotal });
+      window.open(settings.linePayUrl || "https://line.me/R/pay", "_blank");
+    } else {
+      // 銀行轉帳：進入確認付款畫面
+      setStep("payment");
+    }
+  };
+
+  const handleBankConfirm = () => {
+    onPlaceOrder({ ...form, payNow, subtotal });
+  };
+
+  // ── 付款確認畫面（銀行轉帳）
+  if (step === "payment") return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={0} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "20px 16px 40px" }}>
+        <button onClick={() => setStep("form")} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700, marginBottom: 20 }}>← 修改訂單</button>
+
+        {/* 金額摘要 */}
+        <TagCard style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <div style={{ width: 28, height: 28, borderRadius: 8, background: C.hamLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}></div>
+            <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>付款金額明細</span>
+          </div>
+
+          {keys.map(id => {
+            const p = products.find(x => x.id == id);
+            return <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "3px 0" }}>
+              <span>{p.em} {p.name} × {cart[id]}</span><span>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+            </div>;
+          })}
+
+          <div style={{ borderTop: `1.5px solid ${C.line}`, marginTop: 10, paddingTop: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "3px 0" }}>
+              <span>商品小計</span><span>{money(subtotal)}</span>
+            </div>
+
+            {isConvenience && isFreeShipping && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, padding: "6px 8px", background: C.leafLight, borderRadius: 8, margin: "4px 0" }}>
+                <div>
+                  <div style={{ color: C.leaf, fontWeight: 700 }}> 免運資格折抵</div>
+                  <div style={{ fontSize: 11, color: C.leaf, marginTop: 2 }}>{`取貨時仍須付現 NT$${COD_TOTAL}`}</div>
+                </div>
+                <span style={{ color: C.leaf, fontWeight: 700 }}>{`− NT$${COD_TOTAL}`}</span>
+              </div>
+            )}
+
+            {isConvenience && !isFreeShipping && (
+              <div style={{ fontFamily: SANS, fontSize: 13, margin: "4px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 8px", background: C.warnLight, borderRadius: "8px 8px 0 0" }}>
+                  <div>
+                    <div style={{ color: C.warn, fontWeight: 700 }}> 代收費預扣（從匯款扣除）</div>
+                    <div style={{ fontSize: 11, color: C.warn, marginTop: 2 }}>賣貨便代收手續費</div>
+                  </div>
+                  <span style={{ color: C.warn, fontWeight: 700 }}>− NT$20</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 8px", background: "#FFF8EE", borderRadius: "0 0 8px 8px" }}>
+                  <div>
+                    <div style={{ color: C.inkSoft, fontWeight: 700 }}> 取貨時付現給超商</div>
+                    <div style={{ fontSize: 11, color: C.inkMuted, marginTop: 2 }}>運費 NT$38 + 代收費 NT$20</div>
+                  </div>
+                  <span style={{ color: C.inkSoft, fontWeight: 700 }}>{`NT$${COD_TOTAL}`}</span>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 8, borderTop: `1.5px solid ${C.line}` }}>
+              <span style={{ fontFamily: SANS, fontSize: 15, fontWeight: 700, color: C.ink }}>現在需匯款</span>
+              <span style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: C.ham }}>{money(payNow)}</span>
+            </div>
+          </div>
+        </TagCard>
+
+        {/* 超商貨到付款說明 */}
+        {isConvenience && (
+          <div style={{ background: C.warnLight, border: `1.5px solid ${C.warn}40`, borderRadius: 12, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 6 }}> 賣貨便貨到付款說明</div>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: "#7A5800", lineHeight: 1.8 }}>
+              {`取貨時一律以現金支付超商 `}<b>{`NT$${COD_TOTAL}`}</b>（運費 NT$38 + 代收手續費 NT$20）。
+              {isFreeShipping
+                ? <><br /> 您已達免運資格，NT${COD_TOTAL} 已從匯款金額全額折抵，<b>匯款時不需再付運費</b>。</>
+                : <><br /> 代收費 NT$20 已從您的匯款金額預扣。運費 NT$38 請取貨時直接付給超商人員，<b>不需匯入</b>帳戶。</>
+              }
+            </div>
+          </div>
+        )}
+
+        {/* 銀行帳號 */}
+        <TagCard style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <div style={{ width: 28, height: 28, borderRadius: 8, background: C.leafLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}></div>
+            <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>銀行轉帳帳號</span>
+          </div>
+          {[
+            ["銀行", settings.bankName],
+            ["帳號", settings.bankAccount],
+            ["戶名", settings.bankHolder],
+          ].map(([label, val]) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>{label}</span>
+              <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{val}</span>
+            </div>
+          ))}
+          <div style={{ marginTop: 12, padding: "10px 12px", background: C.hamLight, borderRadius: 10 }}>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.ham, fontWeight: 700, marginBottom: 4 }}>付款後請至 Line 群組上傳轉帳截圖</div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkSoft }}>轉帳後 24 小時內請完成截圖回傳，逾時訂單將取消</div>
+          </div>
+        </TagCard>
+
+        <Btn variant="ham" onClick={handleBankConfirm} full>我已完成轉帳，確認下單</Btn>
+        <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, textAlign: "center", marginTop: 10 }}>確認後系統將自動發送 Line 通知給店家</p>
+      </div>
+    </div>
+  );
+
+  // ── 表單頁
+  return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 40 }}>
+        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 返回</button>
+          <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>填寫訂單</span>
+        </div>
+        <div style={{ padding: "0 16px" }}>
+          {/* 姓名 */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>姓名</FieldLabel>
+            <input style={inputSt} placeholder="輸入您的稱呼" value={form.name} onChange={set("name")} />
+          </div>
+
+          {/* 電話（必填） */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>聯絡電話</FieldLabel>
+            <input style={inputSt} type="tel" placeholder="請填寫手機號碼" value={form.phone} onChange={set("phone")} />
+          </div>
+
+          {/* Line ID（選填） */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>Line ID <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 400, color: C.inkMuted }}>（選填）</span></FieldLabel>
+            <input style={inputSt} placeholder="例：@username 或手機號碼" value={form.lineId} onChange={set("lineId")} />
+          </div>
+
+          {/* Line 社群暱稱（選填） */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>Line 社群暱稱</FieldLabel>
+            <input style={inputSt} placeholder="您在 Line 社群中的顯示名稱" value={form.lineName} onChange={set("lineName")} />
+            <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 5 }}>
+              讓店家在 Line 社群中能快速找到您，確認付款與取貨事宜
+            </p>
+          </div>
+
+          {/* 取貨方式 */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>取貨方式</FieldLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {settings.pickupOptions.map(opt => (
+                <button key={opt} onClick={() => setForm(f => ({ ...f, pickup: opt }))} style={{
+                  padding: 11, borderRadius: 12, fontSize: 13, fontFamily: SANS,
+                  border: form.pickup === opt ? `2px solid ${C.forest}` : `1.5px solid ${C.line}`,
+                  background: form.pickup === opt ? C.leafLight : "#fff",
+                  color: form.pickup === opt ? C.forest : C.inkSoft,
+                  fontWeight: form.pickup === opt ? 700 : 400,
+                  cursor: "pointer", transition: "all .15s",
+                }}>{opt}</button>
+              ))}
+            </div>
+            {/* 超商代收提示 */}
+            {isConvenience && (
+              <div style={{ marginTop: 8, padding: "10px 12px", background: C.warnLight, borderRadius: 10, border: `1px solid ${C.warn}30` }}>
+                <span style={{ fontFamily: SANS, fontSize: 12, color: "#7A5800" }}>
+                   超商賣貨便貨到付款，取貨時須付現 <b>NT$58</b>（運費 NT$38 + 代收費 NT$20）。
+                  {isFreeShipping
+                    ? <> 已達免運資格，NT$58 已從匯款金額全額折抵。</>
+                    : <> 代收費 NT$20 已從匯款金額預扣；運費 NT$38 取貨時直接付給超商。</>
+                  }
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* 付款方式 */}
+          <div style={{ marginBottom: 16 }}>
+            <FieldLabel>付款方式</FieldLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[
+                { id: "銀行轉帳", icon: "", desc: "轉帳後上傳截圖" },
+                { id: "Line Pay", icon: "", desc: "點擊直接跳轉付款" },
+              ].filter(o => settings.payOptions.includes(o.id)).map(opt => (
+                <button key={opt.id} onClick={() => setForm(f => ({ ...f, pay: opt.id }))} style={{
+                  padding: "12px 10px", borderRadius: 12, fontFamily: SANS,
+                  border: form.pay === opt.id ? `2px solid ${form.pay === "Line Pay" ? "#00B900" : C.forest}` : `1.5px solid ${C.line}`,
+                  background: form.pay === opt.id ? (form.pay === "Line Pay" ? "#F0FFF4" : C.leafLight) : "#fff",
+                  color: form.pay === opt.id ? (form.pay === "Line Pay" ? "#007A00" : C.forest) : C.inkSoft,
+                  cursor: "pointer", transition: "all .15s", textAlign: "center",
+                }}>
+                  <div style={{ fontSize: 22, marginBottom: 4 }}>{opt.icon}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{opt.id}</div>
+                  <div style={{ fontSize: 11, marginTop: 2, opacity: 0.8 }}>{opt.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <FieldLabel>備注（選填）</FieldLabel>
+            <input style={inputSt} placeholder="特殊需求請寫在這裡" value={form.note} onChange={set("note")} />
+          </div>
+          <div style={{ marginBottom: 20, padding: "10px 14px", background: C.warnLight, borderRadius: 10, border: `1px dashed ${C.warn}60` }}>
+            <p style={{ fontFamily: SANS, fontSize: 12, color: "#7A5800", lineHeight: 1.8, margin: 0 }}>
+              ⚖️ <b>超商取貨限重提醒：</b>單筆訂單總重量須 ≤ 10 公斤。如購買數量較多或商品較重，店家可能主動聯繫您調整運送方式（如改宅配），運費將另行告知。
+            </p>
+          </div>
+
+          {/* 訂單摘要 */}
+          <TagCard style={{ padding: 16, marginBottom: isConvenience ? 8 : 20 }}>
+            <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 10 }}>訂單明細</div>
+            {keys.map(id => {
+              const p = products.find(x => x.id == id);
+              return <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "4px 0" }}>
+                <span>{p.em} {p.name} × {cart[id]}</span><span>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+              </div>;
+            })}
+            <div style={{ borderTop: `1.5px solid ${C.line}`, marginTop: 10, paddingTop: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>商品小計</span>
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>{money(subtotal)}</span>
+              </div>
+              {isConvenience && !isFreeShipping && (
+                <div style={{ marginBottom: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: C.warnLight, borderRadius: "8px 8px 0 0" }}>
+                    <div>
+                      <div style={{ fontFamily: SANS, fontSize: 13, color: C.warn, fontWeight: 700 }}> 代收費預扣（從匯款扣除）</div>
+                      <div style={{ fontFamily: SANS, fontSize: 11, color: C.warn, marginTop: 2 }}>賣貨便代收手續費</div>
+                    </div>
+                    <span style={{ fontFamily: SANS, fontSize: 13, color: C.warn, fontWeight: 700, flexShrink: 0, marginLeft: 8 }}>− NT$20</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "#FFF8EE", borderRadius: "0 0 8px 8px", borderTop: `1px solid ${C.warn}20` }}>
+                    <div>
+                      <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, fontWeight: 700 }}> 取貨時付現給超商</div>
+                      <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 2 }}>運費 NT$38 + 代收費 NT$20</div>
+                    </div>
+                    <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, fontWeight: 700, flexShrink: 0, marginLeft: 8 }}>NT$58</span>
+                  </div>
+                </div>
+              )}
+              {isConvenience && isFreeShipping && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, padding: "8px 10px", background: C.leafLight, borderRadius: 8 }}>
+                  <div>
+                    <div style={{ fontFamily: SANS, fontSize: 13, color: C.leaf, fontWeight: 700 }}> 免運折抵（已從匯款扣除）</div>
+                    <div style={{ fontFamily: SANS, fontSize: 11, color: C.leaf, marginTop: 2 }}>{`取貨時仍須付現 NT$${COD_TOTAL}（`}貨到付款）</div>
+                  </div>
+                  <span style={{ fontFamily: SANS, fontSize: 13, color: C.leaf, fontWeight: 700, flexShrink: 0, marginLeft: 8 }}>{`− NT$${COD_TOTAL}`}</span>
+                </div>
+              )}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", paddingTop: 10, borderTop: `1.5px solid ${C.line}`, marginTop: 6 }}>
+                <span style={{ fontFamily: SANS, fontSize: 14, fontWeight: 700, color: C.ink }}>
+                  {form.pay === "Line Pay" ? "Line Pay 付款金額" : "現在需匯款"}
+                </span>
+                <span style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: C.ham }}>{money(payNow)}</span>
+              </div>
+            </div>
+          </TagCard>
+
+          {/* 貨到付款備注 */}
+          {isConvenience && (
+            <div style={{
+              marginBottom: 20, padding: "10px 14px",
+              background: "#FFFBF0", borderRadius: 10,
+              border: `1px dashed ${C.warn}80`,
+            }}>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, lineHeight: 1.8, margin: 0 }}>
+                 <b style={{ color: C.ink }}>賣貨便貨到付款說明：</b>
+                無論是否免運，取貨時一律以現金支付超商{" "}
+                <b style={{ color: C.warn }}>{`NT$${COD_TOTAL}`}（運費 NT$38 + 代收手續費 NT$20）</b>。
+                {isFreeShipping
+                  ? <>{" "}因已達免運資格，此 {`NT$${COD_TOTAL}`} 已從匯款金額中折抵，取貨付現即可。</>
+                  : <>{" "}請備妥現金交給超商人員。</>
+                }
+              </p>
+            </div>
+          )}
+
+          <Btn
+            variant={form.pay === "Line Pay" ? "ghost" : "ham"}
+            onClick={handleConfirm}
+            disabled={!form.name.trim() || !form.phone.trim() || !form.lineName.trim()}
+            full
+          >
+            {form.pay === "Line Pay" ? " 前往 Line Pay 付款" : "查看匯款帳號並下單"}
+          </Btn>
+          <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, textAlign: "center", marginTop: 10 }}>
+            {form.pay === "Line Pay" ? "點擊後將跳轉至 Line Pay 完成付款" : "下一步將顯示轉帳帳號"}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   SUCCESS
+══════════════════════════════════════════ */
+function SuccessScreen({ settings, order, onContinue, onViewOrders, onPolicyClick, onGoAdmin }) {
+  const [lineSent, setLineSent] = useState(false);
+
+  // 組成預填 Line 訊息內容
+  const lineMsg = [
+    "【倉鼠用品團購選物 訂單確認】",
+    "",
+    `訂單編號：${order.id}`,
+    `姓名：${order.name}`,
+    `社群暱稱：${order.lineName || "未填寫"}`,
+    `電話：${order.phone}`,
+    `Line ID：${order.lineId || "未填寫"}`,
+    `商品：${order.items}`,
+    `商品小計：NT$${Number(order.subtotal).toLocaleString()}`,
+    `匯款金額：NT$${Number(order.payNow).toLocaleString()}${order.pickup === "超商取貨" ? `（取貨時另付現 NT$58 給超商）` : ""}`,
+    `取貨：${order.pickup}`,
+    `付款：${order.pay}`,
+    ...(order.note ? [`備注：${order.note}`] : []),
+    "",
+    "以上訂單請幫我確認，謝謝！",
+  ].join("\n");
+
+  const lineUrl = `https://line.me/R/oaMessage/${encodeURIComponent(settings.lineId || "@399imwfk")}/?${encodeURIComponent(lineMsg)}`;
+
+  const handleSendLine = () => {
+    window.open(lineUrl, "_blank");
+    setLineSent(true);
+  };
+
+  return (
+    <div>
+      <StorefrontHeader settings={settings} cartCount={0} onGoCart={() => {}} onGoAdmin={() => {}} />
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "32px 24px 40px", textAlign: "center" }}>
+
+        {/* 成功圖示 */}
+        <div style={{ width: 72, height: 72, borderRadius: "50%", background: C.leafLight, border: `2px solid ${C.leaf}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontFamily: SERIF, fontSize: 28, fontWeight: 900, color: C.leaf }}>✓</div>
+        <h2 style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink, marginBottom: 8 }}>下單成功！</h2>
+        <p style={{ fontFamily: SANS, fontSize: 14, color: C.inkSoft, lineHeight: 1.7, marginBottom: 24 }}>
+          感謝您的訂購，請完成以下兩個步驟<br />確保店家收到您的訂單
+        </p>
+
+        {/* 步驟 1：傳送 Line 確認 */}
+        <div style={{
+          background: lineSent ? "#F0FFF4" : "#fff",
+          border: `2px solid ${lineSent ? "#00B900" : "#00B900"}`,
+          borderRadius: 18, padding: "20px 20px 16px",
+          marginBottom: 14, textAlign: "left",
+          transition: "background .3s",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: "50%",
+              background: lineSent ? "#00B900" : "#E8FBE8",
+              border: `2px solid #00B900`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 14, flexShrink: 0, transition: "background .3s",
+            }}>
+              {lineSent ? "" : "1"}
+            </div>
+            <div>
+              <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 700, color: lineSent ? "#007A00" : C.ink }}>
+                {lineSent ? "已傳送！等待店家確認" : "傳送訂單至 Line 官方帳號"}
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
+                {lineSent ? `已傳送至 ${settings.lineId}` : "點擊後將自動帶入訂單內容，直接傳送給店家"}
+              </div>
+            </div>
+          </div>
+
+          {/* 預填訊息預覽 */}
+          <div style={{
+            background: "#F6FBF6", borderRadius: 10, padding: "10px 14px",
+            marginBottom: 14, border: "1px solid #C8ECC8",
+          }}>
+            <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "#007A00", marginBottom: 6, letterSpacing: "0.4px" }}>
+              預填訊息內容預覽
+            </div>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: "#3A6B3A", lineHeight: 1.9, whiteSpace: "pre-wrap" }}>
+{`【倉鼠用品團購選物 訂單確認】
+
+訂單編號：${order.id}
+姓名：${order.name}
+社群暱稱：${order.lineName || "未填寫"}
+電話：${order.phone}
+Line ID：${order.lineId || "未填寫"}
+商品：${order.items}
+商品小計：NT$${Number(order.subtotal).toLocaleString()}
+匯款金額：NT$${Number(order.payNow).toLocaleString()}${order.pickup === "超商取貨" ? "（取貨時另付現 NT$58 給超商）" : ""}
+取貨：${order.pickup}
+付款：${order.pay}${order.note ? `\n備注：${order.note}` : ""}`}
+            </div>
+          </div>
+
+          <button
+            onClick={handleSendLine}
+            style={{
+              width: "100%", padding: "13px",
+              borderRadius: 12, border: "none", cursor: "pointer",
+              background: lineSent ? "#00A000" : "#00B900",
+              color: "#fff", fontFamily: SANS, fontSize: 15, fontWeight: 700,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              transition: "background .2s",
+            }}
+          >
+            <span style={{ fontSize: 20 }}></span>
+            {lineSent ? "再次傳送 Line 訊息" : `傳送訂單至 ${settings.lineId}`}
+          </button>
+
+          {!lineSent && (
+            <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkSoft, textAlign: "center", marginTop: 8 }}>
+              將開啟 Line App，點擊傳送即完成
+            </p>
+          )}
+        </div>
+
+        {/* 步驟 2：付款提醒 */}
+        <div style={{
+          background: "#fff", border: `1.5px solid ${C.line}`,
+          borderRadius: 18, padding: "18px 20px 16px",
+          marginBottom: 24, textAlign: "left",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: "50%",
+              background: C.hamLight, border: `2px solid ${C.ham}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ham, flexShrink: 0,
+            }}>2</div>
+            <div>
+              <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 700, color: C.ink }}>完成付款</div>
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>請在 24 小時內完成匯款並上傳截圖</div>
+            </div>
+          </div>
+          {order.pay === "銀行轉帳" && (
+            <div style={{ background: C.bg, borderRadius: 10, padding: "10px 14px" }}>
+              {[
+                ["銀行", settings.bankName],
+                ["帳號", settings.bankAccount],
+                ["戶名", settings.bankHolder],
+                ["匯款金額", `NT$${Number(order.payNow).toLocaleString()}`],
+              ].map(([label, val]) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, padding: "4px 0", borderBottom: `1px solid ${C.line}` }}>
+                  <span style={{ color: C.inkSoft }}>{label}</span>
+                  <span style={{ color: label === "匯款金額" ? C.ham : C.ink, fontWeight: 700 }}>{val}</span>
+                </div>
+              ))}
+              {order.pickup === "超商取貨" && (
+                <div style={{ marginTop: 8, padding: "8px 10px", background: C.warnLight, borderRadius: 8 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: "#7A5800", lineHeight: 1.7 }}>
+                    ⚠️ 取貨時另須付現 <b>NT$58</b> 給超商（運費 NT$38 + 代收費 NT$20）
+                    {Number(order.payNow) < Number(order.subtotal)
+                      ? "，免運折抵已從上方匯款金額扣除。"
+                      : "，此費用請直接付給超商人員，不需匯入帳戶。"}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {order.pay === "Line Pay" && (
+            <div style={{ background: "#F0FFF4", borderRadius: 10, padding: "10px 14px" }}>
+              <p style={{ fontFamily: SANS, fontSize: 13, color: "#007A00" }}>Line Pay 付款連結已在下單時開啟，若尚未付款請重新前往完成。</p>
+            </div>
+          )}
+        </div>
+
+        {/* 操作按鈕 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <Btn variant="primary" onClick={onContinue} full>繼續購物</Btn>
+          <button onClick={onViewOrders} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700 }}>查看訂單狀態</button>
+        </div>
+      </div>
+      <StorefrontFooter settings={settings} onPolicyClick={onPolicyClick} onGoAdmin={onGoAdmin} />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   MY ORDERS
+══════════════════════════════════════════ */
+function MyOrdersScreen({ settings, orders, cart, onBack, onPolicyClick, onGoAdmin }) {
+  const SC = {
+    pending:   { label: "待確認", bg: C.warnLight,  color: C.warn },
+    paid:      { label: "已付款", bg: C.leafLight,   color: C.leaf },
+    shipping:  { label: "待出貨", bg: "#EEF2FF",     color: "#4F5FAD" },
+    shipped:   { label: "已出貨", bg: "#F3E8FF",     color: "#7C3AED" },
+    ready:     { label: "可取貨", bg: C.hamLight,    color: C.ham  },
+    done:      { label: "已完成", bg: C.bg,          color: C.inkSoft },
+    cancelled: { label: "已取消", bg: C.dangerLight, color: C.danger },
+  };
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+  return (
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 80 }}>
+        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 返回</button>
+          <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>我的訂單</span>
+        </div>
+        <div style={{ padding: "8px 14px" }}>
+          {orders.length === 0
+            ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>還沒有訂單記錄</div>
+            : orders.map(o => {
+                const s = SC[o.status] || SC.pending;
+                return (
+                  <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>{o.id}</span>
+                      <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color }}>{s.label}</span>
+                    </div>
+                    <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginBottom: 8, lineHeight: 1.6 }}>{o.items}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ink }}>{o.total}</span>
+                      <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>{o.date}</span>
+                    </div>
+                  </TagCard>
+                );
+              })
+          }
+        </div>
+      </div>
+      <StorefrontFooter settings={settings} onPolicyClick={onPolicyClick} onGoAdmin={onGoAdmin} />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   BOTTOM NAV
+══════════════════════════════════════════ */
+function BottomNav({ active, onHome, onCart, onOrders, cartCount }) {
+  const items = [
+    { id: "home",   label: "首頁",  icon: "", action: onHome },
+    { id: "cart",   label: "購物車",icon: "", action: onCart,   badge: cartCount },
+    { id: "orders", label: "訂單",  icon: "", action: onOrders },
+  ];
+  return (
+    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.card, borderTop: `1.5px solid ${C.line}`, display: "flex", zIndex: 30 }}>
+      {items.map(it => (
+        <button key={it.id} onClick={it.action} style={{
+          flex: 1, display: "flex", flexDirection: "column", alignItems: "center",
+          gap: 3, padding: "10px 0 16px", border: "none", background: "none",
+          cursor: "pointer", color: active === it.id ? C.ham : C.inkSoft,
+          fontFamily: SANS, fontSize: 10, fontWeight: active === it.id ? 700 : 400,
+          position: "relative",
+        }}>
+          <span style={{ fontSize: 22, lineHeight: 1 }}>{it.icon}</span>
+          {it.label}
+          {it.badge > 0 && (
+            <span style={{ position: "absolute", top: 6, right: "calc(50% - 14px)", background: C.ham, color: "#fff", fontSize: 10, fontWeight: 700, width: 18, height: 18, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SANS }}>{it.badge}</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   ADMIN LOGIN  — 6 位數字鍵盤
+══════════════════════════════════════════ */
+function AdminLogin({ settings, onAuthed, onBack }) {
+  const [digits, setDigits] = useState([]);   // max 6
+  const [shake,  setShake]  = useState(false);
+  const [err,    setErr]    = useState(false);
+  const PIN_LEN = 6;
+
+  const press = d => {
+    if (digits.length >= PIN_LEN) return;
+    setErr(false);
+    const next = [...digits, d];
+    setDigits(next);
+    if (next.length === PIN_LEN) {
+      if (next.join("") === settings.adminPin) {
+        onAuthed();
+      } else {
+        setShake(true);
+        setErr(true);
+        setTimeout(() => { setShake(false); setDigits([]); }, 700);
+      }
+    }
+  };
+  const del = () => { if (digits.length > 0) { setDigits(d => d.slice(0, -1)); setErr(false); } };
+
+  const KEYS = [
+    [1,2,3],
+    [4,5,6],
+    [7,8,9],
+    ["←",0,""],   // ← = backspace, "" = placeholder
+  ];
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <div style={{ maxWidth: 360, margin: "0 auto", padding: "50px 24px 40px", flex: 1, display: "flex", flexDirection: "column" }}>
+        {/* Back */}
+        <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 36, alignSelf: "flex-start" }}>← 返回前台</button>
+
+        {/* Icon + title */}
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ width: 64, height: 64, borderRadius: 20, background: C.forest, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", boxShadow: `0 4px 0 ${C.forestDark}`, fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: "#fff", letterSpacing: "-1px" }}>管理</div>
+          <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink }}>店家後台</div>
+          <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginTop: 5 }}>請輸入 6 位數管理密碼</div>
+        </div>
+
+        {/* Dot indicators */}
+        <div style={{
+          display: "flex", justifyContent: "center", gap: 14, marginBottom: 10,
+          animation: shake ? "shake .6s ease" : "none",
+        }}>
+          <style>{`
+            @keyframes shake {
+              0%,100%{transform:translateX(0)}
+              15%{transform:translateX(-8px)}
+              30%{transform:translateX(8px)}
+              45%{transform:translateX(-6px)}
+              60%{transform:translateX(6px)}
+              75%{transform:translateX(-3px)}
+              90%{transform:translateX(3px)}
+            }
+          `}</style>
+          {Array.from({ length: PIN_LEN }).map((_, i) => {
+            const filled = i < digits.length;
+            return (
+              <div key={i} style={{
+                width: 18, height: 18, borderRadius: "50%",
+                background: err ? C.danger : filled ? C.forest : "transparent",
+                border: `2px solid ${err ? C.danger : filled ? C.forest : C.inkMuted}`,
+                transition: "all .15s",
+              }} />
+            );
+          })}
+        </div>
+        {err && (
+          <p style={{ textAlign: "center", fontFamily: SANS, fontSize: 13, color: C.danger, marginBottom: 4 }}>密碼錯誤，請再試一次</p>
+        )}
+        <div style={{ height: 24 }} />
+
+        {/* Numpad */}
+        <div style={{ display: "grid", gridTemplateRows: "repeat(4,1fr)", gap: 12 }}>
+          {KEYS.map((row, ri) => (
+            <div key={ri} style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+              {row.map((k, ki) => {
+                if (k === "") return <div key={ki} />;
+                const isDel = k === "←";
+                return (
+                  <button
+                    key={ki}
+                    onClick={() => isDel ? del() : press(k)}
+                    style={{
+                      height: 64, borderRadius: 16,
+                      background: isDel ? "transparent" : C.card,
+                      border: isDel ? "none" : `1.5px solid ${C.line}`,
+                      boxShadow: isDel ? "none" : "0 3px 0 rgba(35,31,24,0.08)",
+                      cursor: "pointer",
+                      fontFamily: SERIF, fontSize: isDel ? 22 : 24, fontWeight: 900,
+                      color: isDel ? C.inkSoft : C.ink,
+                      transition: "transform .08s, box-shadow .08s",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                    onMouseDown={e => { e.currentTarget.style.transform = "translateY(2px)"; e.currentTarget.style.boxShadow = "0 1px 0 rgba(35,31,24,0.08)"; }}
+                    onMouseUp={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = ""; }}
+                    onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = ""; }}
+                  >
+                    {k}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   ADMIN DASHBOARD
+══════════════════════════════════════════ */
+function AdminDashboard({ settings, products, cats, orders, onUpdateSettings, onUpdateProducts, onUpdateCats, onUpdateOrderStatus, onUpdateOrderNote, onLogout }) {
+  const [tab, setTab] = useState("orders");
+
+  const TABS = [
+    { id: "orders",   label: "訂單管理", icon: "" },
+    { id: "products", label: "商品管理", icon: "" },
+    { id: "settings", label: "店家設定", icon: "" },
+  ];
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh" }}>
+      {/* Admin header */}
+      <div style={{ background: C.ink, padding: "14px 20px" }}>
+        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <div>
+              <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: "#fff" }}>{settings.shopName} 後台</div>
+              <div style={{ fontFamily: SANS, fontSize: 11, color: "rgba(255,255,255,.4)" }}>店家管理系統</div>
+            </div>
+          </div>
+          <button onClick={onLogout} style={{ background: "none", border: "1px solid rgba(255,255,255,.2)", borderRadius: 20, padding: "6px 14px", cursor: "pointer", color: "rgba(255,255,255,.7)", fontFamily: SANS, fontSize: 12 }}>登出</button>
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ background: C.card, borderBottom: `1.5px solid ${C.line}` }}>
+        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex" }}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              flex: 1, padding: "14px 8px", border: "none", background: "none",
+              borderBottom: tab === t.id ? `3px solid ${C.forest}` : "3px solid transparent",
+              color: tab === t.id ? C.forest : C.inkSoft,
+              fontFamily: SANS, fontSize: 13, fontWeight: tab === t.id ? 700 : 400,
+              cursor: "pointer", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            }}>
+              <span>{t.icon}</span><span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 680, margin: "0 auto", padding: "20px 16px 60px" }}>
+        {tab === "orders"   && <AdminOrders settings={settings} products={products} orders={orders} onUpdateStatus={onUpdateOrderStatus} onUpdateNote={onUpdateOrderNote} />}
+        {tab === "products" && <AdminProducts products={products} cats={cats} onUpdateProducts={onUpdateProducts} onUpdateCats={onUpdateCats} />}
+        {tab === "settings" && <AdminSettings settings={settings} onSave={onUpdateSettings} />}
+      </div>
+    </div>
+  );
+}
+
+/* ── Admin: Orders ── */
+function AdminOrders({ settings, products, orders, onUpdateStatus, onUpdateNote }) {
+  const SC = {
+    pending:  { label: "待確認", bg: C.warnLight,   color: C.warn },
+    paid:     { label: "已付款", bg: C.leafLight,    color: C.leaf },
+    shipping: { label: "待出貨", bg: "#EEF2FF",      color: "#4F5FAD" },
+    shipped:  { label: "已出貨", bg: "#F3E8FF",      color: "#7C3AED" },
+    ready:    { label: "可取貨", bg: C.hamLight,     color: C.ham  },
+    done:     { label: "已完成", bg: C.bg,           color: C.inkSoft },
+    cancelled:{ label: "已取消", bg: C.dangerLight,  color: C.danger },
+  };
+  // 正向流程（不含取消）
+  const FLOW = ["pending","paid","shipping","shipped","ready","done"];
+  // 往前一步（退回）
+  const prevStatus = s => { const i = FLOW.indexOf(s); return i > 0 ? FLOW[i-1] : null; };
+  const nextStatus = s => { const i = FLOW.indexOf(s); return i >= 0 && i < FLOW.length-1 ? FLOW[i+1] : null; };
+
+  const [confirmCancel, setConfirmCancel] = useState(null); // orderId
+
+  // 統計（排除取消）
+  const active = orders.filter(o => o.status !== "cancelled");
+
+  return (
+    <div>
+      {/* 統計卡片 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+        {[
+          ["全部訂單", active.length,                                              C.forest],
+          ["待確認",  orders.filter(o=>o.status==="pending").length,               C.warn],
+          ["待出貨",  orders.filter(o=>["paid","shipping"].includes(o.status)).length, "#4F5FAD"],
+          ["已完成",  orders.filter(o=>o.status==="done").length,                  C.inkSoft],
+        ].map(([label, val, color]) => (
+          <TagCard key={label} style={{ padding: "14px 16px" }}>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>{label}</div>
+            <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color }}>{val}</div>
+          </TagCard>
+        ))}
+      </div>
+
+      {orders.length === 0
+        ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>目前還沒有訂單</div>
+        : orders.map(o => {
+            const s = SC[o.status] || SC.pending;
+            const ns = nextStatus(o.status);
+            const ps = prevStatus(o.status);
+            const isCancelled = o.status === "cancelled";
+            return (
+              <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10, opacity: isCancelled ? 0.6 : 1 }}>
+
+                {/* 頂部：姓名 + 狀態 */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                  <div>
+                    <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ink }}>{o.name}</span>
+                    <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginLeft: 8 }}>{o.id}</span>
+                  </div>
+                  <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color, whiteSpace: "nowrap" }}>{s.label}</span>
+                </div>
+
+                {/* 訂單資訊 */}
+                <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginBottom: 4 }}>{o.items}</div>
+                <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginBottom: 8 }}>
+                  {o.pickup} · {o.pay} · <span style={{ fontFamily: SERIF, fontWeight: 700, color: C.ink }}>{o.total}</span>
+                </div>
+                {o.phone    && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>電話：{o.phone}</div>}
+                {o.lineId   && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>Line ID：{o.lineId}</div>}
+                {o.lineName && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8 }}>社群暱稱：{o.lineName}</div>}
+                {o.note     && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8, padding: "6px 10px", background: C.bg, borderRadius: 8 }}> 客人備注：{o.note}</div>}
+
+                {/* 店家備注 */}
+                {!isCancelled && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted, letterSpacing: "0.4px", textTransform: "uppercase", marginBottom: 5 }}>店家備注</div>
+                    <textarea
+                      value={o.adminNote || ""}
+                      onChange={e => onUpdateNote(o.id, e.target.value)}
+                      placeholder="記錄付款進度、特殊注意事項…"
+                      rows={2}
+                      style={{
+                        width: "100%", padding: "8px 12px", borderRadius: 8, resize: "vertical",
+                        border: `1.5px solid ${o.adminNote ? C.ham : C.line}`,
+                        background: o.adminNote ? C.hamLight : "#fff",
+                        color: C.ink, fontFamily: SANS, fontSize: 12, outline: "none",
+                        transition: "border-color .15s, background .15s",
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* 操作按鈕列 */}
+                {!isCancelled && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+                    {/* 退回上一步 */}
+                    {ps && (
+                      <button onClick={() => onUpdateStatus(o.id, ps)} style={{
+                        padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS,
+                        border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft,
+                        cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+                      }}>← 退回「{SC[ps].label}」</button>
+                    )}
+                    {/* 前進下一步 */}
+                    {ns && (
+                      <button onClick={() => onUpdateStatus(o.id, ns)} style={{
+                        padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700,
+                        border: "none", background: C.forest, color: "#fff",
+                        cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+                      }}>標記「{SC[ns].label}」→</button>
+                    )}
+                    {/* 取消訂單 */}
+                    {confirmCancel === o.id
+                      ? <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                          <span style={{ fontFamily: SANS, fontSize: 12, color: C.danger }}>確定取消？</span>
+                          <button onClick={() => { onUpdateStatus(o.id, "cancelled"); setConfirmCancel(null); }} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700, border: "none", background: C.danger, color: "#fff", cursor: "pointer" }}>確定</button>
+                          <button onClick={() => setConfirmCancel(null)} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>返回</button>
+                        </div>
+                      : <button onClick={() => setConfirmCancel(o.id)} style={{ marginLeft: "auto", padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.danger}40`, background: C.dangerLight, color: C.danger, cursor: "pointer" }}>取消訂單</button>
+                    }
+                  </div>
+                )}
+
+                {/* 已取消：可恢復 */}
+                {isCancelled && (
+                  <div style={{ paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+                    <button onClick={() => onUpdateStatus(o.id, "pending")} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>恢復為待確認</button>
+                  </div>
+                )}
+              </TagCard>
+            );
+          })
+      }
+    </div>
+  );
+}
+
+/* ── Admin: Products ── */
+function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [newCat, setNewCat] = useState("");
+
+  const startEdit = p => { setDraft({ ...p }); setEditingId(p.id); };
+  const startNew  = () => { const p = { id: uid(), name: "", unit: "", price: 0, orig: 0, groupPrice: 0, em: "", img: "", cat: cats[1]?.id || "food", stock: 0 }; setDraft(p); setEditingId("new"); };
+  const save = () => {
+    if (editingId === "new") onUpdateProducts([...products, draft]);
+    else onUpdateProducts(products.map(p => p.id === editingId ? draft : p));
+    setEditingId(null); setDraft(null);
+  };
+  const del = id => onUpdateProducts(products.filter(p => p.id !== id));
+
+  const addCat = () => {
+    if (!newCat.trim()) return;
+    const id = newCat.toLowerCase().replace(/\s/g, "_") + "_" + uid();
+    onUpdateCats([...cats, { id, label: newCat.trim() }]);
+    setNewCat("");
+  };
+  const delCat = id => { if (id === "all") return; onUpdateCats(cats.filter(c => c.id !== id)); };
+
+  const inputSt = { width: "100%", padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none" };
+
+  if (editingId) return (
+    <div>
+      <button onClick={() => { setEditingId(null); setDraft(null); }} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 20 }}>← 返回商品列表</button>
+      <TagCard style={{ padding: 20 }}>
+        <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: C.ink, marginBottom: 16 }}>{editingId === "new" ? "新增商品" : "編輯商品"}</div>
+
+        {/* 商品圖片上傳 */}
+        <div style={{ marginBottom: 18 }}>
+          <FieldLabel>商品圖片</FieldLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {draft.img
+              ? <div style={{ position: "relative", width: "100%", aspectRatio: "1", borderRadius: 12, overflow: "hidden", border: `1.5px solid ${C.line}` }}>
+                  <img src={draft.img} alt="商品圖" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  <button onClick={() => setDraft(d => ({ ...d, img: "" }))} style={{
+                    position: "absolute", top: 8, right: 8,
+                    width: 28, height: 28, borderRadius: "50%",
+                    background: "rgba(0,0,0,.55)", border: "none", color: "#fff",
+                    cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>×</button>
+                </div>
+              : <label style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                  gap: 8, padding: "28px 16px", borderRadius: 12, cursor: "pointer",
+                  border: `2px dashed ${C.line}`, background: C.bg,
+                }}>
+                  
+                  <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>點擊上傳商品圖片</span>
+                  <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>支援 JPG、PNG、WEBP</span>
+                  <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = ev => setDraft(d => ({ ...d, img: ev.target.result }));
+                    reader.readAsDataURL(file);
+                  }} />
+                </label>
+            }
+          </div>
+        </div>
+
+        {[["商品名稱","name","text"],["計量單位","unit","text"],["售價（原價）","price","number"],["庫存數量","stock","number"]].map(([label, key, type]) => (
+          <div key={key} style={{ marginBottom: 14 }}>
+            <FieldLabel>{label}</FieldLabel>
+            <input type={type} style={inputSt} value={draft[key]} onChange={e => setDraft(d => ({ ...d, [key]: type === "number" ? Number(e.target.value) : e.target.value }))} />
+          </div>
+        ))}
+        <div style={{ marginBottom: 14 }}>
+          <FieldLabel>團購價 <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 400, color: C.inkMuted }}>（選填，填入後前台顯示團購優惠價，原價自動劃線）</span></FieldLabel>
+          <input type="number" style={{ ...inputSt, border: `1.5px solid ${draft.groupPrice > 0 ? C.ham : C.line}`, background: draft.groupPrice > 0 ? C.hamLight : "#fff" }} value={draft.groupPrice || 0} onChange={e => setDraft(d => ({ ...d, groupPrice: Number(e.target.value) }))} />
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <FieldLabel>分類</FieldLabel>
+          <select value={draft.cat} onChange={e => setDraft(d => ({ ...d, cat: e.target.value }))} style={inputSt}>
+            {cats.filter(c => c.id !== "all").map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+          </select>
+        </div>
+        <div style={{ marginBottom: 20 }}>
+          <FieldLabel>商品詳細說明</FieldLabel>
+          <textarea
+            rows={6}
+            placeholder={"成分、規格、注意事項、重量…等詳細資訊"}
+            value={draft.desc || ""}
+            onChange={e => setDraft(d => ({ ...d, desc: e.target.value }))}
+            style={{ ...inputSt, resize: "vertical", lineHeight: 1.7 }}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Btn variant="ham" onClick={save} full>儲存商品</Btn>
+          <Btn variant="subtle" onClick={() => { setEditingId(null); setDraft(null); }}>取消</Btn>
+        </div>
+      </TagCard>
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Category manager */}
+      <TagCard style={{ padding: 18, marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink }}>分類管理</div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 2 }}>前台分類篩選標籤，新增後可在商品編輯中選用</div>
+          </div>
+          <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, background: C.bg, borderRadius: 20, padding: "3px 10px" }}>{cats.filter(c=>c.id!=="all").length} 個分類</span>
+        </div>
+
+        {/* 現有分類 */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, minHeight: 34 }}>
+          {cats.filter(c => c.id !== "all").length === 0 && (
+            <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, fontStyle: "italic" }}>尚未新增分類</span>
+          )}
+          {cats.filter(c => c.id !== "all").map(c => (
+            <div key={c.id} style={{
+              display: "flex", alignItems: "center", gap: 6,
+              background: C.hamLight, border: `1.5px solid ${C.hamMid}`,
+              borderRadius: 20, padding: "6px 12px 6px 14px",
+            }}>
+              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ham }}>{c.label}</span>
+              <button
+                onClick={() => delCat(c.id)}
+                title={`刪除「${c.label}」`}
+                style={{
+                  width: 18, height: 18, borderRadius: "50%",
+                  background: "rgba(179,48,40,.12)", border: "none",
+                  cursor: "pointer", color: C.danger,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 12, fontWeight: 900, lineHeight: 1,
+                }}
+              >×</button>
+            </div>
+          ))}
+        </div>
+
+        {/* 新增分類輸入 */}
+        <div style={{ borderTop: `1.5px solid ${C.line}`, paddingTop: 14 }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkSoft, letterSpacing: "0.4px", textTransform: "uppercase", marginBottom: 8 }}>新增分類</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={newCat}
+              onChange={e => setNewCat(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addCat(); } }}
+              placeholder="輸入分類名稱，按 Enter 或點新增"
+              style={{
+                flex: 1, padding: "10px 14px", borderRadius: 10,
+                border: `1.5px solid ${newCat.trim() ? C.ham : C.line}`,
+                background: "#fff", color: C.ink,
+                fontFamily: SANS, fontSize: 13, outline: "none",
+                transition: "border-color .15s",
+              }}
+            />
+            <button
+              onClick={addCat}
+              disabled={!newCat.trim()}
+              style={{
+                padding: "10px 18px", borderRadius: 10, border: "none",
+                background: newCat.trim() ? C.ham : C.line,
+                color: newCat.trim() ? "#fff" : C.inkMuted,
+                fontFamily: SANS, fontSize: 13, fontWeight: 700,
+                cursor: newCat.trim() ? "pointer" : "not-allowed",
+                transition: "all .15s", whiteSpace: "nowrap",
+                boxShadow: newCat.trim() ? `0 2px 0 ${C.hamDark}` : "none",
+              }}
+            >＋ 新增</button>
+          </div>
+        </div>
+      </TagCard>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>商品列表（{products.length} 項）</div>
+        <Btn small variant="ham" onClick={startNew}>+ 新增商品</Btn>
+      </div>
+
+      {products.map(p => (
+        <TagCard key={p.id} style={{ padding: "12px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 10, overflow: "hidden", background: C.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {p.img
+              ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : <span style={{ fontSize: 26 }}>{p.em}</span>}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}</div>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>{p.unit} · {money(p.price)} · 庫存 {p.stock}</div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Btn small variant="subtle" onClick={() => startEdit(p)}>編輯</Btn>
+            <Btn small variant="danger" onClick={() => del(p.id)}>刪除</Btn>
+          </div>
+        </TagCard>
+      ))}
+    </div>
+  );
+}
+
+/* ── Admin: Settings ── (分類完整可修改) */
+function AdminSettings({ settings, onSave }) {
+  const [d, setD] = useState({ ...settings });
+  const [saved, setSaved] = useState(false);
+  const set = k => e => setD(s => ({ ...s, [k]: e.target.value }));
+  const setB = k => v => setD(s => ({ ...s, [k]: v }));
+
+  const handleSave = () => { onSave(d); setSaved(true); setTimeout(() => setSaved(false), 2000); };
+
+  const inputSt = { width: "100%", padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none" };
+  const textSt  = { ...inputSt, resize: "vertical" };
+
+  const Section = ({ title, emoji, children }) => (
+    <TagCard style={{ padding: 20, marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, paddingBottom: 12, borderBottom: `1.5px solid ${C.line}` }}>
+        <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>{title}</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {children}
+      </div>
+    </TagCard>
+  );
+
+  const F = ({ label, hint, children }) => (
+    <div>
+      <FieldLabel>{label}</FieldLabel>
+      {children}
+      {hint && <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 5, lineHeight: 1.5 }}>{hint}</p>}
+    </div>
+  );
+
+  /* Pickup/Pay option editor */
+  const OptionEditor = ({ label, options, onChange }) => {
+    const [newVal, setNewVal] = useState("");
+    return (
+      <F label={label}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+          {options.map((opt, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, background: C.leafLight, border: `1.5px solid ${C.leaf}20`, borderRadius: 20, padding: "5px 12px" }}>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.forest }}>{opt}</span>
+              <button onClick={() => onChange(options.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: C.danger, fontSize: 14, lineHeight: 1 }}>×</button>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder="新增選項" style={{ ...inputSt, flex: 1 }} />
+          <Btn small variant="subtle" onClick={() => { if (newVal.trim()) { onChange([...options, newVal.trim()]); setNewVal(""); } }}>新增</Btn>
+        </div>
+      </F>
+    );
+  };
+
+  return (
+    <div>
+      {/* 基本資訊 */}
+      <Section title="基本資訊" emoji="">
+        <F label="店名"><input style={inputSt} value={d.shopName} onChange={set("shopName")} /></F>
+        <F label="標語"><input style={inputSt} value={d.tagline} onChange={set("tagline")} /></F>
+        <F label="店鋪 Emoji" hint="顯示於頁頭 Logo 與頁尾"><input style={inputSt} value={d.shopEmoji} onChange={set("shopEmoji")} /></F>
+        <F label="管理密碼（6 位數）" hint="請記住新密碼，下次登入需使用，必須為 6 位數字"><input style={inputSt} type="password" inputMode="numeric" maxLength={6} value={d.adminPin} onChange={e => { if (/^\d{0,6}$/.test(e.target.value)) setD(s => ({...s, adminPin: e.target.value})); }} /></F>
+      </Section>
+
+      {/* 頁頭設定 */}
+      <Section title="頁頭公告列" emoji="">
+        <F label="顯示公告列">
+          <Toggle checked={d.showAnnouncement} onChange={setB("showAnnouncement")} label={d.showAnnouncement ? "顯示中" : "已隱藏"} />
+        </F>
+        <F label="公告文字" hint="顯示於網站頂端的跑馬燈公告">
+          <input style={inputSt} value={d.headerAnnouncement} onChange={set("headerAnnouncement")} />
+        </F>
+      </Section>
+
+      {/* Hero Banner */}
+      <Section title="首頁 Hero 橫幅" emoji="">
+        <F label="標籤文字" hint="橘色小標籤，例如「本週特惠」「新品上架」">
+          <input style={inputSt} value={d.heroBadge} onChange={set("heroBadge")} placeholder="本週特惠" />
+        </F>
+        <F label="主標題" hint="可換行，用 Enter 分行">
+          <textarea style={textSt} rows={3} value={d.heroTitle} onChange={set("heroTitle")} placeholder="倉鼠用品&#10;限量團購中" />
+        </F>
+        <F label="特惠價格（選填）" hint="留空則不顯示">
+          <input style={inputSt} value={d.heroPrice} onChange={set("heroPrice")} placeholder="299" />
+        </F>
+        <F label="原價（選填）" hint="留空則不顯示劃線原價">
+          <input style={inputSt} value={d.heroOrigPrice} onChange={set("heroOrigPrice")} placeholder="420" />
+        </F>
+        <F label="背景圖片" hint="上傳後圖片會顯示為 Hero 背景，文字會自動加深色遮罩保持可讀">
+          {d.heroImg
+            ? <div style={{ position: "relative", borderRadius: 12, overflow: "hidden", marginBottom: 8 }}>
+                <img src={d.heroImg} alt="hero" style={{ width: "100%", height: 120, objectFit: "cover", display: "block" }} />
+                <button onClick={() => setD(s => ({ ...s, heroImg: "" }))} style={{
+                  position: "absolute", top: 8, right: 8, width: 28, height: 28, borderRadius: "50%",
+                  background: "rgba(0,0,0,.6)", border: "none", color: "#fff",
+                  cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>×</button>
+              </div>
+            : <label style={{
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                gap: 6, padding: "20px 16px", borderRadius: 10, cursor: "pointer",
+                border: `2px dashed ${C.line}`, background: C.bg,
+              }}>
+                
+                <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>點擊上傳背景圖片</span>
+                <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+                  const file = e.target.files[0]; if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = ev => setD(s => ({ ...s, heroImg: ev.target.result }));
+                  reader.readAsDataURL(file);
+                }} />
+              </label>
+          }
+        </F>
+      </Section>
+
+      {/* 購物須知 */}
+      <Section title="購物須知" emoji="">
+        <F label="須知內容" hint="客人進入網站時會先閱讀此內容，勾選同意後才能下單">
+          <textarea style={textSt} rows={10} value={d.notice} onChange={set("notice")} />
+        </F>
+      </Section>
+
+      {/* 下單選項 */}
+      <Section title="下單選項" emoji="">
+        <OptionEditor label="取貨方式選項" options={d.pickupOptions} onChange={v => setD(s => ({ ...s, pickupOptions: v }))} />
+        <OptionEditor label="付款方式選項" options={d.payOptions} onChange={v => setD(s => ({ ...s, payOptions: v }))} />
+        <F label="Line Pay 付款連結" hint="客人選擇 Line Pay 時會跳轉到此連結">
+          <input style={inputSt} value={d.linePayUrl} onChange={set("linePayUrl")} placeholder="https://line.me/R/pay/..." />
+        </F>
+        <F label="免運門檻（NT$）" hint="購買滿此金額自動享有免運，會從匯款金額折抵運費">
+          <input style={inputSt} type="number" value={d.freeShippingThreshold} onChange={e => setD(s => ({...s, freeShippingThreshold: Number(e.target.value)}))} />
+        </F>
+        <F label="運費金額（NT$）" hint="達免運門檻時從匯款金額折抵的金額">
+          <input style={inputSt} type="number" value={d.shippingFee} onChange={e => setD(s => ({...s, shippingFee: Number(e.target.value)}))} />
+        </F>
+        <F label="超商代收手續費（NT$）" hint="選擇超商取貨時，從匯款金額預扣、取貨時付給超商的金額">
+          <input style={inputSt} type="number" value={d.codFee} onChange={e => setD(s => ({...s, codFee: Number(e.target.value)}))} />
+        </F>
+      </Section>
+
+      {/* 聯絡資訊 */}
+      <Section title="聯絡資訊（頁尾顯示）" emoji="">
+        <F label="Line ID"><input style={inputSt} value={d.lineId} onChange={set("lineId")} /></F>
+        <F label="Line 群組連結"><input style={inputSt} value={d.lineGroupUrl} onChange={set("lineGroupUrl")} /></F>
+        <F label="電話"><input style={inputSt} value={d.phone} onChange={set("phone")} /></F>
+        <F label="Email"><input style={inputSt} value={d.email} onChange={set("email")} /></F>
+        <F label="地址"><input style={inputSt} value={d.address} onChange={set("address")} /></F>
+        <F label="營業時間"><input style={inputSt} value={d.businessHours} onChange={set("businessHours")} /></F>
+      </Section>
+
+      {/* 付款資訊 */}
+      <Section title="收款帳戶（結帳時顯示）" emoji="">
+        <F label="銀行名稱"><input style={inputSt} value={d.bankName} onChange={set("bankName")} /></F>
+        <F label="帳號"><input style={inputSt} value={d.bankAccount} onChange={set("bankAccount")} /></F>
+        <F label="戶名"><input style={inputSt} value={d.bankHolder} onChange={set("bankHolder")} /></F>
+      </Section>
+
+      {/* 社群帳號 */}
+      <Section title="社群帳號（頁尾顯示）" emoji="">
+        <F label="Instagram 帳號"><input style={inputSt} value={d.igHandle} onChange={set("igHandle")} /></F>
+        <F label="Instagram 連結"><input style={inputSt} value={d.igUrl} onChange={set("igUrl")} /></F>
+        <F label="Facebook 粉專名稱"><input style={inputSt} value={d.fbHandle} onChange={set("fbHandle")} /></F>
+        <F label="Facebook 連結"><input style={inputSt} value={d.fbUrl} onChange={set("fbUrl")} /></F>
+      </Section>
+
+      {/* 頁尾文字 */}
+      <Section title="頁尾文字" emoji="">
+        <F label="品牌介紹" hint="顯示於頁尾左側"><textarea style={textSt} rows={3} value={d.footerAbout} onChange={set("footerAbout")} /></F>
+        <F label="隱私政策說明"><input style={inputSt} value={d.privacyText} onChange={set("privacyText")} /></F>
+        <F label="著作權聲明"><input style={inputSt} value={d.copyrightText} onChange={set("copyrightText")} /></F>
+      </Section>
+
+      {/* 政策頁面 */}
+      <Section title="購物須知" emoji="">
+        <F label="內容" hint="顯示於前台「購物須知」頁面">
+          <textarea style={textSt} rows={12} value={d.policyNotice} onChange={set("policyNotice")} />
+        </F>
+      </Section>
+
+      <Section title="退貨政策" emoji="">
+        <F label="內容" hint="顯示於前台「退貨政策」頁面">
+          <textarea style={textSt} rows={12} value={d.policyReturn} onChange={set("policyReturn")} />
+        </F>
+      </Section>
+
+      <Section title="隱私權政策" emoji="">
+        <F label="內容" hint="顯示於前台「隱私權政策」頁面">
+          <textarea style={textSt} rows={12} value={d.policyPrivacy} onChange={set("policyPrivacy")} />
+        </F>
+      </Section>
+
+      <Section title="運送說明" emoji="">
+        <F label="內容" hint="顯示於前台「運送說明」頁面">
+          <textarea style={textSt} rows={12} value={d.policyShipping} onChange={set("policyShipping")} />
+        </F>
+      </Section>
+
+      <div style={{ position: "sticky", bottom: 0, background: C.bg, padding: "16px 0 8px" }}>
+        <Btn variant={saved ? "primary" : "ham"} onClick={handleSave} full>
+          {saved ? " 已儲存！" : "儲存所有設定"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   ROOT APP
+══════════════════════════════════════════ */
+function App() {
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [products, setProducts] = useState(INIT_PRODUCTS);
+  const [cats,     setCats]     = useState(INIT_CATS);
+  const [noticed,  setNoticed]  = useState(false);
+  const [screen,   setScreen]   = useState("home");
+  const [cart,     setCart]     = useState({});
+  const [myOrders, setMyOrders] = useState([]);
+  const [lastOrder,   setLastOrder]   = useState(null);
+  const [policyPage,  setPolicyPage]  = useState(null);
+  const [adminMode, setAdminMode] = useState(false);
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const [dbReady, setDbReady] = useState(false);
+
+  // ── Firebase 初始化 ──
+  const db = React.useRef(null);
+  useEffect(() => {
+    const { initializeApp } = window.FirebaseApp;
+    const { getFirestore, doc, setDoc, getDoc, collection, addDoc, onSnapshot, updateDoc, serverTimestamp } = window.FirebaseFirestore;
+    const app = initializeApp({
+      apiKey: "AIzaSyAHY7u8_S6Y0-I-fUcqx1dP-TI3rsjdvlo",
+      authDomain: "hamster-shop-bb517.firebaseapp.com",
+      projectId: "hamster-shop-bb517",
+      storageBucket: "hamster-shop-bb517.firebasestorage.app",
+      messagingSenderId: "861625762167",
+      appId: "1:861625762167:web:44c0f858a2a8fd7a576172"
+    });
+    const firestore = getFirestore(app);
+    db.current = { firestore, doc, setDoc, getDoc, collection, addDoc, onSnapshot, updateDoc, serverTimestamp };
+
+    // 讀取設定
+    getDoc(doc(firestore, "shop", "settings")).then(snap => {
+      if (snap.exists()) setSettings(s => ({ ...s, ...snap.data() }));
+    });
+
+    // 讀取商品（即時同步）
+    const unsubProducts = onSnapshot(collection(firestore, "products"), snap => {
+      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (list.length > 0) { setProducts(list); }
+    });
+
+    // 讀取分類（即時同步）
+    getDoc(doc(firestore, "shop", "cats")).then(snap => {
+      if (snap.exists() && snap.data().list) setCats(snap.data().list);
+    });
+
+    // 讀取訂單（即時同步）
+    const unsubOrders = onSnapshot(collection(firestore, "orders"), snap => {
+      const list = snap.docs.map(d => ({ ...d.data(), _fireId: d.id }));
+      list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setMyOrders(list);
+    });
+
+    setDbReady(true);
+    return () => { unsubProducts(); unsubOrders(); };
+  }, []);
+
+  const cartCount = Object.values(cart).reduce((a,b) => a+b, 0);
+  const addToCart = id => setCart(c => ({ ...c, [id]: (c[id]||0)+1 }));
+  const changeQty = (id, d) => setCart(c => {
+    const n = Math.max(0, (c[id]||0)+d);
+    if (!n) { const copy = {...c}; delete copy[id]; return copy; }
+    return { ...c, [id]: n };
+  });
+
+  const placeOrder = async form => {
+    const { firestore, collection, addDoc, serverTimestamp } = db.current;
+    const keys = Object.keys(cart).filter(k => cart[k]>0);
+    const total = keys.reduce((acc, id) => { const p = products.find(x=>x.id==id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
+    const items = keys.map(id => { const p = products.find(x=>x.id==id); return `${p.name} x${cart[id]}`; }).join("、");
+    const oid = "#" + Date.now().toString(36).toUpperCase();
+    const order = { id: oid, ...form, items, total: `NT$${total}`, status: "pending", date: new Date().toLocaleString("zh-TW"), createdAt: serverTimestamp() };
+    await addDoc(collection(firestore, "orders"), order);
+    setLastOrder(order);
+    setCart({});
+    setScreen("success");
+  };
+
+  const updateOrderStatus = async (orderId, status) => {
+    const { firestore, collection, updateDoc, doc } = db.current;
+    const o = myOrders.find(x => x.id === orderId);
+    if (o?._fireId) await updateDoc(doc(firestore, "orders", o._fireId), { status });
+  };
+  const updateOrderNote = async (orderId, adminNote) => {
+    const { firestore, updateDoc, doc } = db.current;
+    const o = myOrders.find(x => x.id === orderId);
+    if (o?._fireId) await updateDoc(doc(firestore, "orders", o._fireId), { adminNote });
+  };
+
+  // 儲存設定到 Firebase
+  const saveSettings = async (newSettings) => {
+    const { firestore, doc, setDoc } = db.current;
+    setSettings(newSettings);
+    await setDoc(doc(firestore, "shop", "settings"), newSettings);
+  };
+
+  // 儲存商品到 Firebase
+  const saveProducts = async (newProducts) => {
+    const { firestore, collection, doc, setDoc, addDoc } = db.current;
+    setProducts(newProducts);
+    // 同步所有商品：用 productId 作為 doc id
+    for (const p of newProducts) {
+      await setDoc(doc(firestore, "products", String(p.id)), p);
+    }
+    // 刪除已不存在的商品
+    const { getDocs } = window.FirebaseFirestore;
+    const snap = await getDocs(collection(firestore, "products"));
+    for (const d of snap.docs) {
+      if (!newProducts.find(p => String(p.id) === d.id)) {
+        const { deleteDoc } = window.FirebaseFirestore;
+        await deleteDoc(doc(firestore, "products", d.id));
+      }
+    }
+  };
+
+  // 儲存分類到 Firebase
+  const saveCats = async (newCats) => {
+    const { firestore, doc, setDoc } = db.current;
+    setCats(newCats);
+    await setDoc(doc(firestore, "shop", "cats"), { list: newCats });
+  };
+
+  const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700&display=swap');`;
+
+  // 後台：登入頁
+  if (adminMode && !adminAuthed) return (
+    <div style={{ fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; }`}</style>
+      <AdminLogin
+        settings={settings}
+        onAuthed={() => setAdminAuthed(true)}
+        onBack={() => setAdminMode(false)}
+      />
+    </div>
+  );
+
+  // 後台：主畫面（已驗證）
+  if (adminMode && adminAuthed) return (
+    <div style={{ fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; }`}</style>
+      <AdminDashboard
+        settings={settings} products={products} cats={cats} orders={myOrders}
+        onUpdateSettings={saveSettings}
+        onUpdateProducts={saveProducts}
+        onUpdateCats={saveCats}
+        onUpdateOrderStatus={updateOrderStatus}
+        onUpdateOrderNote={updateOrderNote}
+        onLogout={() => { setAdminMode(false); setAdminAuthed(false); }}
+      />
+    </div>
+  );
+
+  if (policyPage) return (
+    <div style={{ background: C.bg, minHeight: "100vh", fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; } body { background-color: #FEFEF2; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Crect width='56' height='56' fill='%23FEFEF2'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3C/svg%3E"); } ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-thumb{background:${C.line};border-radius:4px;}`}</style>
+      <PolicyPage settings={settings} policyKey={policyPage} onBack={() => setPolicyPage(null)} />
+    </div>
+  );
+
+  if (!noticed) return (
+    <div style={{ background: C.bg, minHeight: "100vh", fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; } body { background-color: #FEFEF2; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Crect width='56' height='56' fill='%23FEFEF2'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3C/svg%3E"); } ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-thumb{background:${C.line};border-radius:4px;}`}</style>
+      <NoticeGate settings={settings} onAgree={() => setNoticed(true)} onGoAdmin={() => setAdminMode(true)} onPolicyClick={setPolicyPage} />
+    </div>
+  );
+
+  const showNav = ["home","orders"].includes(screen);
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; } body { background-color: #FEFEF2; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Crect width='56' height='56' fill='%23FEFEF2'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3C/svg%3E"); } ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-thumb{background:${C.line};border-radius:4px;}`}</style>
+
+      {screen === "home"     && <ShopHome settings={settings} products={products} cats={cats} cart={cart} onAddToCart={addToCart} onChangeQty={changeQty} onGoCart={() => setScreen("cart")} onGoAdmin={() => setAdminMode(true)} onPolicyClick={setPolicyPage} />}
+      {screen === "cart"     && <CartScreen settings={settings} products={products} cart={cart} onBack={() => setScreen("home")} onGoCheckout={() => setScreen("checkout")} onChangeQty={changeQty} />}
+      {screen === "checkout" && <CheckoutScreen settings={settings} products={products} cart={cart} onBack={() => setScreen("cart")} onPlaceOrder={placeOrder} />}
+      {screen === "success"  && lastOrder && <SuccessScreen settings={settings} order={lastOrder} onContinue={() => setScreen("home")} onViewOrders={() => setScreen("orders")} onPolicyClick={setPolicyPage} onGoAdmin={() => setAdminMode(true)} />}
+      {screen === "orders"   && <MyOrdersScreen settings={settings} orders={myOrders} cart={cart} onBack={() => setScreen("home")} onPolicyClick={setPolicyPage} onGoAdmin={() => setAdminMode(true)} />}
+
+      {showNav && <BottomNav active={screen} onHome={() => setScreen("home")} onCart={() => setScreen("cart")} onOrders={() => setScreen("orders")} cartCount={cartCount} />}
+    </div>
+  );
+}
+
+
+    window.__App = App;
+  </script>
+</body>
+</html>
