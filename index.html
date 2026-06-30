@@ -4,13 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>倉鼠用品團購選物</title>
-
-  <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <!-- Firebase -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import * as Firestore from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -19,7 +15,6 @@
     window.__firebaseReady = true;
     window.dispatchEvent(new Event("firebaseReady"));
   </script>
-
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #FEFEF2; }
@@ -44,22 +39,18 @@
     <span style="color:#6E6560;font-size:14px;">載入中…</span>
   </div>
   <div id="root"></div>
-
   <script>
-    // 等 Firebase module 載入完成再啟動 React
     function startApp() {
       if (!window.__firebaseReady) {
         window.addEventListener("firebaseReady", startApp, { once: true });
         return;
       }
       document.getElementById("loading").style.display = "none";
-      // Babel 轉譯完後渲染
       const root = ReactDOM.createRoot(document.getElementById("root"));
       root.render(React.createElement(window.__App));
     }
     window.addEventListener("load", startApp);
   </script>
-
   <script type="text/babel" data-type="module">
     const { useState, useEffect } = React;
 
@@ -106,6 +97,11 @@ const DEFAULT_SETTINGS = {
   tagline:     "社群團Go！優惠多更多！",
   shopEmoji:   "",
   adminPin:    "123456",
+
+  /* 會員集點規則 */
+  pointsEnabled:      false,   // 集點功能總開關
+  pointsPerAmount:    100,     // 每消費多少元
+  pointsPerAmountGet: 1,       // 即可獲得幾點
 
   /* 頁頭 */
   headerAnnouncement: " 本週新品上架！現在下單享優惠！",
@@ -257,6 +253,41 @@ const INIT_CATS = [
 function money(n) { return "NT$" + Number(n).toLocaleString(); }
 function uid()    { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 
+/* 簡易密碼雜湊（使用瀏覽器原生 Web Crypto API，避免明碼存進資料庫） */
+async function hashPassword(password) {
+  const enc = new TextEncoder().encode(password);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+/* 手機號碼格式驗證（台灣 09 開頭 10 碼） */
+function isValidPhone(phone) { return /^09\d{8}$/.test(phone); }
+
+/* 圖片壓縮：上傳前縮小尺寸並轉成 JPEG，避免 base64 超過 Firestore 單文件 1MB 限制 */
+function compressImage(file, maxDim = 800, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("圖片讀取失敗"));
+    reader.onload = ev => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("圖片格式無法解析"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) { height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 /* ══════════════════════════════════════════
    SHARED UI COMPONENTS
 ══════════════════════════════════════════ */
@@ -366,9 +397,11 @@ function Toggle({ checked, onChange, label }) {
 /* ══════════════════════════════════════════
    STOREFRONT HEADER (前台頁頭)
 ══════════════════════════════════════════ */
-function StorefrontHeader({ settings, cartCount, onGoCart, onGoAdmin }) {
+function StorefrontHeader({ settings, cartCount, onGoCart, onGoAdmin, member, onGoMemberAuth, onGoHome }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
-    <div style={{ background: C.card, borderBottom: `1.5px solid ${C.line}` }}>
+    <div style={{ background: C.card, borderBottom: `1.5px solid ${C.line}`, position: "relative" }}>
       {/* Announcement bar */}
       {settings.showAnnouncement && settings.headerAnnouncement && (
         <div style={{
@@ -391,7 +424,28 @@ function StorefrontHeader({ settings, cartCount, onGoCart, onGoAdmin }) {
             <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkSoft }}>{settings.tagline}</div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+
+          {/* 會員入口：未登入顯示文字按鈕，已登入顯示人頭頭像 */}
+          {onGoMemberAuth && (
+            member ? (
+              <button onClick={onGoMemberAuth} title={`會員：${member.name}`} style={{
+                width: 36, height: 36, borderRadius: "50%",
+                background: C.leafLight, border: `1.5px solid ${C.leaf}`,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0, padding: 0,
+              }}>
+                <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.forest }}>{member.name?.[0] || ""}</span>
+              </button>
+            ) : (
+              <button onClick={onGoMemberAuth} style={{
+                padding: "7px 12px", borderRadius: 20, whiteSpace: "nowrap",
+                background: "#fff", border: `1.5px solid ${C.line}`,
+                color: C.inkSoft, cursor: "pointer",
+                fontFamily: SANS, fontSize: 12, fontWeight: 700,
+              }}>登入／註冊</button>
+            )
+          )}
 
           <button onClick={onGoCart} style={{
             display: "flex", alignItems: "center", gap: 7,
@@ -407,6 +461,69 @@ function StorefrontHeader({ settings, cartCount, onGoCart, onGoAdmin }) {
               justifyContent: "center", fontSize: 11, fontWeight: 700,
             }}>{cartCount}</span>
           </button>
+
+          {/* 漢堡選單按鈕：只在有提供導覽功能的頁面顯示 */}
+          {onGoMemberAuth && (
+            <button onClick={() => setMenuOpen(true)} style={{
+              width: 36, height: 36, borderRadius: "50%",
+              background: C.bg, border: `1.5px solid ${C.line}`,
+              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0, padding: 0,
+            }}>
+              <span dangerouslySetInnerHTML={{ __html: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${C.inkSoft}" strokeWidth="2.2" strokeLinecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>` }} />
+            </button>
+          )}
+
+          {/* 漢堡選單下拉內容 */}
+          {onGoMemberAuth && menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 49, background: "rgba(0,0,0,0.4)" }} />
+              <div style={{
+                position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 50,
+                width: "82%", maxWidth: 340,
+                background: C.bg, boxShadow: "-8px 0 24px rgba(0,0,0,.15)",
+                display: "flex", flexDirection: "column", overflowY: "auto",
+              }}>
+                {/* 上方深色區塊：登入/會員按鈕 */}
+                <div style={{ background: C.ham, padding: "20px 18px 24px", flexShrink: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+                    <button onClick={() => setMenuOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#fff", padding: 4, display: "flex" }}>
+                      <span dangerouslySetInnerHTML={{ __html: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></svg>` }} />
+                    </button>
+                  </div>
+                  <button onClick={() => { onGoMemberAuth(); setMenuOpen(false); }} style={{
+                    width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    background: "#fff", border: "none", borderRadius: 14, padding: "14px 16px",
+                    cursor: "pointer", fontFamily: SANS, fontSize: 15, fontWeight: 700, color: C.ham,
+                  }}>
+                    <span dangerouslySetInnerHTML={{ __html: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${C.ham}" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>` }} />
+                    {member ? `會員：${member.name}` : "登入／註冊"}
+                  </button>
+                </div>
+
+                {/* 下方選單列表 */}
+                <div style={{ padding: "20px 18px", flex: 1 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted, letterSpacing: "0.6px", marginBottom: 10 }}>選單</div>
+                  {[
+                    { label: "首頁", svg: `<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>`, action: () => { onGoHome && onGoHome(); setMenuOpen(false); } },
+                    { label: member ? "我的會員" : "登入／註冊", svg: `<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>`, action: () => { onGoMemberAuth(); setMenuOpen(false); } },
+                  ].map((it, i) => (
+                    <button key={it.label} onClick={it.action} style={{
+                      width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "16px 4px", border: "none", borderBottom: `1px solid ${C.line}`,
+                      background: "none", cursor: "pointer",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span dangerouslySetInnerHTML={{ __html: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${C.ink}" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">${it.svg}</svg>` }} />
+                        <span style={{ fontFamily: SANS, fontSize: 15, fontWeight: 700, color: C.ink }}>{it.label}</span>
+                      </div>
+                      <span dangerouslySetInnerHTML={{ __html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${C.inkMuted}" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>` }} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -443,7 +560,6 @@ function StorefrontFooter({ settings, onPolicyClick, onGoAdmin }) {
         <div style={{ borderTop: "1px solid rgba(255,255,255,.1)", paddingTop: 18, marginBottom: 16 }}>
           <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 12 }}>聯絡資訊</div>
           <Row icon="">Line：{settings.lineId}</Row>
-          <Row icon="">{settings.phone}</Row>
           <Row icon="">{settings.email}</Row>
           <Row icon="">{settings.address}</Row>
           <Row icon="">{settings.businessHours}</Row>
@@ -598,11 +714,13 @@ function NoticeGate({ settings, onAgree, onGoAdmin, onPolicyClick }) {
 /* ══════════════════════════════════════════
    SHOP HOME
 ══════════════════════════════════════════ */
-function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, onGoCart, onGoAdmin, onPolicyClick }) {
+function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, onAddVariant, onChangeQtyVariant, onGoCart, onGoAdmin, onPolicyClick, member, onGoMemberAuth, onLogoutMember, onDetailChange, onGoHome }) {
   const [cat, setCat] = useState("all");
-  const [detailId, setDetailId] = useState(null);
+  const [detailId, setDetailIdRaw] = useState(null);
+  const setDetailId = id => { setDetailIdRaw(id); if (onDetailChange) onDetailChange(!!id); };
   const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
-  const filtered = cat === "all" ? products : products.filter(p => p.cat === cat);
+  const activeProducts = products.filter(p => p.active !== false);
+  const filtered = cat === "all" ? activeProducts : activeProducts.filter(p => p.cat === cat);
 
   if (detailId) {
     const p = products.find(x => x.id == detailId);
@@ -610,9 +728,9 @@ function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, on
       <ProductDetail
         settings={settings}
         product={p}
-        qty={cart[p.id] || 0}
-        onAdd={() => onAddToCart(p.id)}
-        onChangeQty={onChangeQty}
+        cart={cart}
+        onAddVariant={onAddVariant}
+        onChangeQtyVariant={onChangeQtyVariant}
         onBack={() => setDetailId(null)}
       />
     );
@@ -621,8 +739,9 @@ function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, on
   return (
     <div>
       <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
-        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={onGoCart} onGoAdmin={onGoAdmin} />
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={onGoCart} onGoAdmin={onGoAdmin} member={member} onGoMemberAuth={onGoMemberAuth} onGoHome={onGoHome} />
       </div>
+
       <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 100 }}>
         {/* Hero */}
         <div style={{
@@ -677,6 +796,9 @@ function ShopHome({ settings, products, cats, cart, onAddToCart, onChangeQty, on
 }
 
 function ProductCard({ product: p, qty, onAdd, onDetail }) {
+  const hasVariants = (p.variants || []).length > 0;
+  const minPrice = hasVariants ? Math.min(...p.variants.map(v => v.groupPrice > 0 ? v.groupPrice : v.price)) : null;
+  const totalStock = hasVariants ? p.variants.reduce((a, v) => a + (v.stock || 0), 0) : p.stock;
   return (
     <TagCard style={{ overflow: "hidden", cursor: "pointer" }} onClick={onDetail}>
       <div style={{ aspectRatio: "1", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 52, position: "relative", overflow: "hidden" }}>
@@ -699,7 +821,13 @@ function ProductCard({ product: p, qty, onAdd, onDetail }) {
         <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 8 }}>{p.unit}</div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            {p.groupPrice > 0 ? (
+            {hasVariants ? (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
+                <span style={{ fontFamily: SANS, fontSize: 10, color: C.inkMuted }}>NT$</span>
+                <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ham }}>{minPrice}</span>
+                <span style={{ fontFamily: SANS, fontSize: 10, color: C.inkMuted }}>起</span>
+              </div>
+            ) : p.groupPrice > 0 ? (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: "#fff", background: C.ham, borderRadius: 6, padding: "1px 5px" }}>團購價</span>
@@ -711,8 +839,12 @@ function ProductCard({ product: p, qty, onAdd, onDetail }) {
               <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ham }}>{money(p.price)}</span>
             )}
           </div>
-          {p.stock > 0
-            ? <button onClick={e => { e.stopPropagation(); onAdd(); }} style={{ width: 30, height: 30, borderRadius: "50%", background: C.ham, border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 0 ${C.hamDark}` }}>+</button>
+          {totalStock > 0
+            ? hasVariants
+              ? <button onClick={e => { e.stopPropagation(); onDetail(); }} style={{ padding: "6px 12px", borderRadius: 20, background: C.ham, border: "none", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", boxShadow: `0 2px 0 ${C.hamDark}` }}>選規格</button>
+              : qty >= totalStock
+                ? <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: C.inkMuted, background: C.bg, borderRadius: 20, padding: "5px 10px" }}>已達上限</span>
+                : <button onClick={e => { e.stopPropagation(); onAdd(); }} style={{ width: 30, height: 30, borderRadius: "50%", background: C.ham, border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 0 ${C.hamDark}` }}>+</button>
             : <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.danger }}>缺貨</span>
           }
         </div>
@@ -725,11 +857,20 @@ function ProductCard({ product: p, qty, onAdd, onDetail }) {
 /* ══════════════════════════════════════════
    PRODUCT DETAIL PAGE
 ══════════════════════════════════════════ */
-function ProductDetail({ settings, product: p, qty, onAdd, onChangeQty, onBack }) {
+function ProductDetail({ settings, product: p, cart, onAddVariant, onChangeQtyVariant, onBack }) {
+  const hasVariants = (p.variants || []).length > 0;
+  const [selVariant, setSelVariant] = useState(hasVariants ? p.variants[0] : null);
+
+  const cartKey = hasVariants && selVariant ? `${p.id}::${selVariant.name}` : String(p.id);
+  const qty = cart[cartKey] || 0;
+  const curPrice = hasVariants && selVariant ? selVariant.price : p.price;
+  const curGroupPrice = hasVariants && selVariant ? selVariant.groupPrice : p.groupPrice;
+  const curStock = hasVariants && selVariant ? selVariant.stock : p.stock;
+
   return (
     <div>
       <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
-        <StorefrontHeader settings={settings} cartCount={qty} onGoCart={() => {}} onGoAdmin={() => {}} />
+        <StorefrontHeader settings={settings} cartCount={Object.values(cart).reduce((a,b)=>a+b,0)} onGoCart={() => {}} onGoAdmin={() => {}} />
       </div>
       <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 120 }}>
         {/* Back */}
@@ -751,25 +892,53 @@ function ProductDetail({ settings, product: p, qty, onAdd, onChangeQty, onBack }
           <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink, lineHeight: 1.3, marginBottom: 4 }}>{p.name}</div>
           {p.unit && <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkMuted, marginBottom: 12 }}>{p.unit}</div>}
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            {p.groupPrice > 0 ? (
+            {curGroupPrice > 0 ? (
               <>
                 <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: "#fff", background: C.ham, borderRadius: 8, padding: "2px 8px", alignSelf: "center" }}>團購價</span>
-                <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(p.groupPrice)}</span>
-                <span style={{ fontFamily: SANS, fontSize: 15, color: C.inkMuted, textDecoration: "line-through" }}>{money(p.price)}</span>
+                <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(curGroupPrice)}</span>
+                <span style={{ fontFamily: SANS, fontSize: 15, color: C.inkMuted, textDecoration: "line-through" }}>{money(curPrice)}</span>
               </>
             ) : (
-              <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(p.price)}</span>
+              <span style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{money(curPrice)}</span>
             )}
           </div>
 
+          {/* 規格選擇器 */}
+          {hasVariants && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.inkSoft, marginBottom: 8 }}>選擇規格</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {p.variants.map((v, i) => {
+                  const isSel = selVariant && selVariant.name === v.name;
+                  const soldOut = (v.stock || 0) <= 0;
+                  return (
+                    <button key={i}
+                      disabled={soldOut}
+                      onClick={() => setSelVariant(v)}
+                      style={{
+                        padding: "8px 16px", borderRadius: 20, fontFamily: SANS, fontSize: 13,
+                        border: isSel ? `2px solid ${C.ham}` : `1.5px solid ${C.line}`,
+                        background: soldOut ? "#F5F5F5" : isSel ? C.hamLight : "#fff",
+                        color: soldOut ? C.inkMuted : isSel ? C.ham : C.inkSoft,
+                        fontWeight: isSel ? 700 : 400,
+                        cursor: soldOut ? "not-allowed" : "pointer",
+                        opacity: soldOut ? 0.5 : 1,
+                        textDecoration: soldOut ? "line-through" : "none",
+                      }}>{v.name}{soldOut ? "（售完）" : ""}</button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* 庫存狀態 */}
           <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 20, marginBottom: 20,
-            background: p.stock > 0 ? C.leafLight : C.dangerLight,
-            border: `1px solid ${p.stock > 0 ? C.leaf : C.danger}40`,
+            background: curStock > 0 ? C.leafLight : C.dangerLight,
+            border: `1px solid ${curStock > 0 ? C.leaf : C.danger}40`,
           }}>
-            <div style={{ width: 7, height: 7, borderRadius: "50%", background: p.stock > 0 ? C.leaf : C.danger }} />
-            <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: p.stock > 0 ? C.leaf : C.danger }}>
-              {p.stock > 0 ? `尚有庫存 ${p.stock} 件` : "已售完"}
+            <div style={{ width: 7, height: 7, borderRadius: "50%", background: curStock > 0 ? C.leaf : C.danger }} />
+            <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: curStock > 0 ? C.leaf : C.danger }}>
+              {curStock > 0 ? `尚有庫存 ${curStock} 件` : "已售完"}
             </span>
           </div>
 
@@ -785,18 +954,32 @@ function ProductDetail({ settings, product: p, qty, onAdd, onChangeQty, onBack }
 
       {/* 底部加入購物車 */}
       <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.card, borderTop: `1.5px solid ${C.line}`, padding: "14px 20px 28px", zIndex: 30 }}>
-        {p.stock > 0 ? (
+        {curStock > 0 ? (
           qty > 0 ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.bg, borderRadius: 40, padding: "6px 14px", border: `1.5px solid ${C.line}` }}>
-                <button onClick={() => onChangeQty(p.id, -1)} style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: "#fff", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
-                <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{qty}</span>
-                <button onClick={() => onChangeQty(p.id, 1)} style={{ width: 30, height: 30, borderRadius: "50%", background: C.ham, border: "none", color: "#fff", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 2px 0 ${C.hamDark}` }}>+</button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.bg, borderRadius: 40, padding: "6px 14px", border: `1.5px solid ${C.line}` }}>
+                  <button onClick={() => onChangeQtyVariant(p, selVariant, -1)} style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: "#fff", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                  <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{qty}</span>
+                  <button
+                    onClick={() => qty < curStock && onChangeQtyVariant(p, selVariant, 1)}
+                    disabled={qty >= curStock}
+                    style={{
+                      width: 30, height: 30, borderRadius: "50%", border: "none",
+                      background: qty >= curStock ? C.line : C.ham,
+                      color: "#fff", cursor: qty >= curStock ? "not-allowed" : "pointer",
+                      fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center",
+                      boxShadow: qty >= curStock ? "none" : `0 2px 0 ${C.hamDark}`,
+                    }}>+</button>
+                </div>
+                <Btn variant="ham" onClick={() => qty < curStock && onAddVariant(p, selVariant)} full disabled={qty >= curStock}> 再加一件</Btn>
               </div>
-              <Btn variant="ham" onClick={onAdd} full> 再加一件</Btn>
+              {qty >= curStock && (
+                <p style={{ fontFamily: SANS, fontSize: 11, color: C.danger, textAlign: "center", margin: 0 }}>已達庫存上限（{curStock} 件）</p>
+              )}
             </div>
           ) : (
-            <Btn variant="ham" onClick={onAdd} full> 加入購物車</Btn>
+            <Btn variant="ham" onClick={() => onAddVariant(p, selVariant)} full> 加入購物車</Btn>
           )
         ) : (
           <Btn variant="subtle" disabled full>已售完</Btn>
@@ -809,15 +992,30 @@ function ProductDetail({ settings, product: p, qty, onAdd, onChangeQty, onBack }
 /* ══════════════════════════════════════════
    CART
 ══════════════════════════════════════════ */
-function CartScreen({ settings, products, cart, onBack, onGoCheckout, onChangeQty }) {
+function CartScreen({ settings, products, cart, member, onGoHome, onGoMemberAuth, onBack, onGoCheckout, onChangeQty, onChangeQtyVariant }) {
+  const resolveKey = key => {
+    const [pid, vname] = String(key).split("::");
+    const p = products.find(x => String(x.id) === pid);
+    if (!p) return null;
+    const v = vname ? (p.variants || []).find(v => v.name === vname) : null;
+    return { product: p, variant: v };
+  };
+  const priceOf = key => {
+    const r = resolveKey(key);
+    if (!r) return 0;
+    const { product: p, variant: v } = r;
+    if (v) return v.groupPrice > 0 ? v.groupPrice : v.price;
+    return p.groupPrice > 0 ? p.groupPrice : p.price;
+  };
+
   const keys = Object.keys(cart).filter(k => cart[k] > 0);
-  const total = keys.reduce((acc, id) => { const p = products.find(x => x.id == id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
+  const total = keys.reduce((acc, key) => acc + priceOf(key) * cart[key], 0);
   const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
 
   return (
     <div>
       <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
-        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} member={member} onGoMemberAuth={onGoMemberAuth} onGoHome={onGoHome} />
       </div>
       <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 120 }}>
         <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10 }}>
@@ -830,24 +1028,40 @@ function CartScreen({ settings, products, cart, onBack, onGoCheckout, onChangeQt
               <p style={{ fontFamily: SANS, color: C.inkSoft, fontSize: 14 }}>購物車是空的，回去挑選吧！</p>
             </div>
           : <div style={{ padding: "10px 14px" }}>
-              {keys.map(id => {
-                const p = products.find(x => x.id == id);
+              {keys.map(key => {
+                const r = resolveKey(key);
+                if (!r) return null;
+                const { product: p, variant: v } = r;
+                const unitPrice = priceOf(key);
+                const stockLimit = v ? Number(v.stock || 0) : Number(p.stock || 0);
+                const atLimit = cart[key] >= stockLimit;
                 return (
-                  <TagCard key={id} style={{ padding: "14px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 14 }}>
+                  <TagCard key={key} style={{ padding: "14px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 14 }}>
                     <div style={{ width: 52, height: 52, borderRadius: 10, overflow: "hidden", background: C.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                       {p.img
                         ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                         : <span style={{ fontSize: 32 }}>{p.em}</span>}
                     </div>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}</div>
-                      <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>{money(p.groupPrice > 0 ? p.groupPrice : p.price)} / 份</div>
+                      <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}{v ? `（${v.name}）` : ""}</div>
+                      <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>{money(unitPrice)} / 份</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-                        <button onClick={() => onChangeQty(id, -1)} style={{ width: 28, height: 28, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: C.bg, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
-                        <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, minWidth: 22, textAlign: "center" }}>{cart[id]}</span>
-                        <button onClick={() => onChangeQty(id, 1)} style={{ width: 28, height: 28, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: C.bg, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
-                        <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ham, marginLeft: "auto" }}>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+                        <button onClick={() => onChangeQtyVariant(p, v, -1)} style={{ width: 28, height: 28, borderRadius: "50%", border: `1.5px solid ${C.line}`, background: C.bg, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                        <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, minWidth: 22, textAlign: "center" }}>{cart[key]}</span>
+                        <button
+                          onClick={() => !atLimit && onChangeQtyVariant(p, v, 1)}
+                          disabled={atLimit}
+                          style={{
+                            width: 28, height: 28, borderRadius: "50%",
+                            border: `1.5px solid ${atLimit ? C.line : C.line}`,
+                            background: atLimit ? "#F5F5F5" : C.bg,
+                            color: atLimit ? C.inkMuted : C.ink,
+                            cursor: atLimit ? "not-allowed" : "pointer", fontSize: 16,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                          }}>+</button>
+                        <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ham, marginLeft: "auto" }}>{money(unitPrice * cart[key])}</span>
                       </div>
+                      {atLimit && <p style={{ fontFamily: SANS, fontSize: 10, color: C.danger, marginTop: 4 }}>已達庫存上限（{stockLimit} 件）</p>}
                     </div>
                   </TagCard>
                 );
@@ -871,13 +1085,28 @@ function CartScreen({ settings, products, cart, onBack, onGoCheckout, onChangeQt
 /* ══════════════════════════════════════════
    CHECKOUT  — 付款流程整合版
 ══════════════════════════════════════════ */
-function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
+function CheckoutScreen({ settings, products, cart, member, onBack, onPlaceOrder }) {
+  const resolveKey = key => {
+    const [pid, vname] = String(key).split("::");
+    const p = products.find(x => String(x.id) === pid);
+    if (!p) return null;
+    const v = vname ? (p.variants || []).find(v => v.name === vname) : null;
+    return { product: p, variant: v };
+  };
+  const priceOf = key => {
+    const r = resolveKey(key);
+    if (!r) return 0;
+    const { product: p, variant: v } = r;
+    if (v) return v.groupPrice > 0 ? v.groupPrice : v.price;
+    return p.groupPrice > 0 ? p.groupPrice : p.price;
+  };
+
   const keys = Object.keys(cart).filter(k => cart[k] > 0);
-  const subtotal  = keys.reduce((acc, id) => { const p = products.find(x => x.id == id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
+  const subtotal  = keys.reduce((acc, key) => acc + priceOf(key) * cart[key], 0);
   const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
 
   const [form, setForm] = useState({
-    name: "", phone: "", lineId: "", lineName: "",
+    name: member?.name || "", phone: member?.phone || "", lineId: member?.lineId || "", lineName: "",
     pickup: settings.pickupOptions[0] || "",
     pay: settings.payOptions[0] || "",
     note: "",
@@ -907,20 +1136,37 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
     color: C.ink, fontFamily: SANS, fontSize: 14, outline: "none",
   };
 
-  const handleConfirm = () => {
+  const [placing, setPlacing] = useState(false);
+  const [placeError, setPlaceError] = useState("");
+
+  const handleConfirm = async () => {
     if (!form.name.trim() || !form.phone.trim() || !form.lineName.trim()) return;
     if (form.pay === "Line Pay") {
-      // 直接導向 Line Pay，同時記訂單
-      onPlaceOrder({ ...form, payNow, subtotal });
-      window.open(settings.linePayUrl || "https://line.me/R/pay", "_blank");
+      // 直接導向 Line Pay，同時記訂單（先扣庫存成功才跳轉付款）
+      setPlaceError("");
+      setPlacing(true);
+      try {
+        await onPlaceOrder({ ...form, payNow, subtotal });
+        window.open(settings.linePayUrl || "https://line.me/R/pay", "_blank");
+      } catch (err) {
+        setPlaceError(err?.message || "下單失敗，請稍後再試");
+      }
+      setPlacing(false);
     } else {
       // 銀行轉帳：進入確認付款畫面
       setStep("payment");
     }
   };
 
-  const handleBankConfirm = () => {
-    onPlaceOrder({ ...form, payNow, subtotal });
+  const handleBankConfirm = async () => {
+    setPlaceError("");
+    setPlacing(true);
+    try {
+      await onPlaceOrder({ ...form, payNow, subtotal });
+    } catch (err) {
+      setPlaceError(err?.message || "下單失敗，請稍後再試");
+    }
+    setPlacing(false);
   };
 
   // ── 付款確認畫面（銀行轉帳）
@@ -939,10 +1185,12 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
             <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>付款金額明細</span>
           </div>
 
-          {keys.map(id => {
-            const p = products.find(x => x.id == id);
-            return <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "3px 0" }}>
-              <span>{p.em} {p.name} × {cart[id]}</span><span>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+          {keys.map(key => {
+            const r = resolveKey(key);
+            if (!r) return null;
+            const { product: p, variant: v } = r;
+            return <div key={key} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "3px 0" }}>
+              <span>{p.em} {p.name}{v ? `（${v.name}）` : ""} × {cart[key]}</span><span>{money(priceOf(key) * cart[key])}</span>
             </div>;
           })}
 
@@ -1023,7 +1271,12 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
           </div>
         </TagCard>
 
-        <Btn variant="ham" onClick={handleBankConfirm} full>我已完成轉帳，確認下單</Btn>
+        {placeError && (
+          <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 10, background: C.dangerLight, border: `1.5px solid ${C.danger}40` }}>
+            <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, lineHeight: 1.6, margin: 0 }}>{placeError}</p>
+          </div>
+        )}
+        <Btn variant="ham" onClick={handleBankConfirm} full disabled={placing}>{placing ? "處理中…" : "我已完成轉帳，確認下單"}</Btn>
         <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, textAlign: "center", marginTop: 10 }}>確認後系統將自動發送 Line 通知給店家</p>
       </div>
     </div>
@@ -1035,7 +1288,7 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
       <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
         <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
       </div>
-      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 40 }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 100 }}>
         <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 返回</button>
           <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>填寫訂單</span>
@@ -1047,10 +1300,15 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
             <input style={inputSt} placeholder="輸入您的稱呼" value={form.name} onChange={set("name")} />
           </div>
 
-          {/* 電話（必填） */}
+          {/* 電話（必填，已登入則鎖定為會員帳號電話） */}
           <div style={{ marginBottom: 16 }}>
             <FieldLabel>聯絡電話</FieldLabel>
-            <input style={inputSt} type="tel" placeholder="請填寫手機號碼" value={form.phone} onChange={set("phone")} />
+            <input
+              style={{ ...inputSt, background: member ? C.bg : "#fff", color: member ? C.inkSoft : C.ink }}
+              type="tel" placeholder="請填寫手機號碼" value={form.phone} onChange={set("phone")}
+              readOnly={!!member}
+            />
+            {member && <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 4 }}>已登入會員帳號，電話不可修改</p>}
           </div>
 
           {/* Line ID（選填） */}
@@ -1059,9 +1317,9 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
             <input style={inputSt} placeholder="例：@username 或手機號碼" value={form.lineId} onChange={set("lineId")} />
           </div>
 
-          {/* Line 社群暱稱（選填） */}
+          {/* Line 社群暱稱（必填） */}
           <div style={{ marginBottom: 16 }}>
-            <FieldLabel>Line 社群暱稱</FieldLabel>
+            <FieldLabel>Line 社群暱稱 <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 400, color: C.danger }}>（必填）</span></FieldLabel>
             <input style={inputSt} placeholder="您在 Line 社群中的顯示名稱" value={form.lineName} onChange={set("lineName")} />
             <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 5 }}>
               讓店家在 Line 社群中能快速找到您，確認付款與取貨事宜
@@ -1102,19 +1360,27 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
             <FieldLabel>付款方式</FieldLabel>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {[
-                { id: "銀行轉帳", icon: "", desc: "轉帳後上傳截圖" },
-                { id: "Line Pay", icon: "", desc: "點擊直接跳轉付款" },
+                { id: "銀行轉帳", icon: "", desc: "轉帳後上傳截圖", disabled: false },
+                { id: "Line Pay", icon: "", desc: "即將開放", disabled: true },
               ].filter(o => settings.payOptions.includes(o.id)).map(opt => (
-                <button key={opt.id} onClick={() => setForm(f => ({ ...f, pay: opt.id }))} style={{
-                  padding: "12px 10px", borderRadius: 12, fontFamily: SANS,
-                  border: form.pay === opt.id ? `2px solid ${form.pay === "Line Pay" ? "#00B900" : C.forest}` : `1.5px solid ${C.line}`,
-                  background: form.pay === opt.id ? (form.pay === "Line Pay" ? "#F0FFF4" : C.leafLight) : "#fff",
-                  color: form.pay === opt.id ? (form.pay === "Line Pay" ? "#007A00" : C.forest) : C.inkSoft,
-                  cursor: "pointer", transition: "all .15s", textAlign: "center",
-                }}>
+                <button key={opt.id}
+                  onClick={() => !opt.disabled && setForm(f => ({ ...f, pay: opt.id }))}
+                  disabled={opt.disabled}
+                  style={{
+                    padding: "12px 10px", borderRadius: 12, fontFamily: SANS,
+                    border: opt.disabled ? `1.5px solid ${C.line}` : form.pay === opt.id ? `2px solid ${C.forest}` : `1.5px solid ${C.line}`,
+                    background: opt.disabled ? "#F7F7F7" : form.pay === opt.id ? C.leafLight : "#fff",
+                    color: opt.disabled ? C.inkMuted : form.pay === opt.id ? C.forest : C.inkSoft,
+                    cursor: opt.disabled ? "not-allowed" : "pointer",
+                    opacity: opt.disabled ? 0.6 : 1,
+                    transition: "all .15s", textAlign: "center", position: "relative",
+                  }}>
                   <div style={{ fontSize: 22, marginBottom: 4 }}>{opt.icon}</div>
                   <div style={{ fontSize: 13, fontWeight: 700 }}>{opt.id}</div>
                   <div style={{ fontSize: 11, marginTop: 2, opacity: 0.8 }}>{opt.desc}</div>
+                  {opt.disabled && (
+                    <div style={{ position: "absolute", top: 6, right: 6, background: C.inkMuted, color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 6, padding: "2px 6px" }}>即將開放</div>
+                  )}
                 </button>
               ))}
             </div>
@@ -1133,10 +1399,12 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
           {/* 訂單摘要 */}
           <TagCard style={{ padding: 16, marginBottom: isConvenience ? 8 : 20 }}>
             <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 10 }}>訂單明細</div>
-            {keys.map(id => {
-              const p = products.find(x => x.id == id);
-              return <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "4px 0" }}>
-                <span>{p.em} {p.name} × {cart[id]}</span><span>{money((p.groupPrice > 0 ? p.groupPrice : p.price) * cart[id])}</span>
+            {keys.map(key => {
+              const r = resolveKey(key);
+              if (!r) return null;
+              const { product: p, variant: v } = r;
+              return <div key={key} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13, color: C.inkSoft, padding: "4px 0" }}>
+                <span>{p.em} {p.name}{v ? `（${v.name}）` : ""} × {cart[key]}</span><span>{money(priceOf(key) * cart[key])}</span>
               </div>;
             })}
             <div style={{ borderTop: `1.5px solid ${C.line}`, marginTop: 10, paddingTop: 10 }}>
@@ -1199,13 +1467,18 @@ function CheckoutScreen({ settings, products, cart, onBack, onPlaceOrder }) {
             </div>
           )}
 
+          {placeError && (
+            <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 10, background: C.dangerLight, border: `1.5px solid ${C.danger}40` }}>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, lineHeight: 1.6, margin: 0 }}>{placeError}</p>
+            </div>
+          )}
           <Btn
             variant={form.pay === "Line Pay" ? "ghost" : "ham"}
             onClick={handleConfirm}
-            disabled={!form.name.trim() || !form.phone.trim() || !form.lineName.trim()}
+            disabled={!form.name.trim() || !form.phone.trim() || !form.lineName.trim() || placing}
             full
           >
-            {form.pay === "Line Pay" ? " 前往 Line Pay 付款" : "查看匯款帳號並下單"}
+            {placing ? "處理中…" : form.pay === "Line Pay" ? " 前往 Line Pay 付款" : "查看匯款帳號並下單"}
           </Btn>
           <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, textAlign: "center", marginTop: 10 }}>
             {form.pay === "Line Pay" ? "點擊後將跳轉至 Line Pay 完成付款" : "下一步將顯示轉帳帳號"}
@@ -1256,9 +1529,16 @@ function SuccessScreen({ settings, order, onContinue, onViewOrders, onPolicyClic
         {/* 成功圖示 */}
         <div style={{ width: 72, height: 72, borderRadius: "50%", background: C.leafLight, border: `2px solid ${C.leaf}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px", fontFamily: SERIF, fontSize: 28, fontWeight: 900, color: C.leaf }}>✓</div>
         <h2 style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink, marginBottom: 8 }}>下單成功！</h2>
-        <p style={{ fontFamily: SANS, fontSize: 14, color: C.inkSoft, lineHeight: 1.7, marginBottom: 24 }}>
+        <p style={{ fontFamily: SANS, fontSize: 14, color: C.inkSoft, lineHeight: 1.7, marginBottom: 16 }}>
           感謝您的訂購，請完成以下兩個步驟<br />確保店家收到您的訂單
         </p>
+
+        {/* 團購到貨提醒 */}
+        <div style={{ background: "#EAF6FC", border: `1.5px solid #8FCBE0`, borderRadius: 14, padding: "14px 16px", marginBottom: 20, textAlign: "left" }}>
+          <p style={{ fontFamily: SANS, fontSize: 13, color: "#1A5C78", lineHeight: 1.8, margin: 0 }}>
+             <b>團購到貨通知：</b>等本次團購商品到貨後，店家會主動聯繫您並提供「賣貨便」下單連結，屆時請完成下單，取貨時付現 <b>NT$58</b> 即可，無需再次匯款。
+          </p>
+        </div>
 
         {/* 步驟 1：傳送 Line 確認 */}
         <div style={{
@@ -1398,7 +1678,7 @@ Line ID：${order.lineId || "未填寫"}
 /* ══════════════════════════════════════════
    MY ORDERS
 ══════════════════════════════════════════ */
-function MyOrdersScreen({ settings, orders, cart, onBack, onPolicyClick, onGoAdmin }) {
+function MemberScreen({ settings, member, orders, cart, onBack, onGoHome, onPolicyClick, onGoAdmin, onViewOrder, onLogout, onUpdateMember, onChangePassword }) {
   const SC = {
     pending:   { label: "待確認", bg: C.warnLight,  color: C.warn },
     paid:      { label: "已付款", bg: C.leafLight,   color: C.leaf },
@@ -1409,23 +1689,210 @@ function MyOrdersScreen({ settings, orders, cart, onBack, onPolicyClick, onGoAdm
     cancelled: { label: "已取消", bg: C.dangerLight, color: C.danger },
   };
   const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ name: member.name || "", lineId: member.lineId || "", birthday: member.birthday || "" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const [changingPwd, setChangingPwd] = useState(false);
+  const [oldPwd, setOldPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [newPwd2, setNewPwd2] = useState("");
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [pwdErr, setPwdErr] = useState("");
+  const [pwdMsg, setPwdMsg] = useState("");
+
+  const inputSt = {
+    width: "100%", padding: "9px 12px", borderRadius: 10,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none",
+  };
+
+  const startEdit = () => { setDraft({ name: member.name || "", lineId: member.lineId || "", birthday: member.birthday || "" }); setErr(""); setEditing(true); };
+  const cancelEdit = () => { setEditing(false); setErr(""); };
+  const saveEdit = async () => {
+    setErr("");
+    if (!draft.name.trim()) { setErr("姓名不可空白"); return; }
+    setBusy(true);
+    try {
+      await onUpdateMember(draft);
+      setEditing(false);
+    } catch (e) {
+      setErr("儲存失敗，請檢查網路連線後再試一次");
+    }
+    setBusy(false);
+  };
+
+  const startChangePwd = () => { setOldPwd(""); setNewPwd(""); setNewPwd2(""); setPwdErr(""); setPwdMsg(""); setChangingPwd(true); };
+  const cancelChangePwd = () => { setChangingPwd(false); setPwdErr(""); };
+  const submitChangePwd = async () => {
+    setPwdErr("");
+    if (!oldPwd) { setPwdErr("請輸入目前的密碼"); return; }
+    if (newPwd.length < 4) { setPwdErr("新密碼至少需 4 碼"); return; }
+    if (newPwd !== newPwd2) { setPwdErr("兩次輸入的新密碼不一致"); return; }
+    setPwdBusy(true);
+    try {
+      await onChangePassword(oldPwd, newPwd);
+      setPwdMsg("密碼已更新，下次登入請使用新密碼");
+      setChangingPwd(false);
+    } catch (e) {
+      setPwdErr(e?.message || "密碼變更失敗，請稍後再試");
+    }
+    setPwdBusy(false);
+  };
+
   return (
     <div>
       <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
-        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} member={member} onGoMemberAuth={() => {}} onGoHome={onGoHome} />
       </div>
-      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 80 }}>
-        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 100 }}>
+        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
           <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 返回</button>
-          <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>我的訂單</span>
+          <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>我的會員</span>
         </div>
-        <div style={{ padding: "8px 14px" }}>
+
+        {/* 會員資訊卡 */}
+        <div style={{ padding: "0 14px", marginBottom: 20 }}>
+          <TagCard style={{ padding: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <div style={{ width: 48, height: 48, borderRadius: "50%", background: C.hamLight, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: C.ham, flexShrink: 0 }}>
+                {member.name?.[0] || ""}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>{member.name}</div>
+                <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginTop: 2 }}>會員編號 {member.phone}</div>
+              </div>
+              {!editing && (
+                <button onClick={startEdit} style={{ background: "none", border: `1.5px solid ${C.line}`, borderRadius: 20, padding: "6px 14px", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 12, fontWeight: 700, flexShrink: 0 }}>編輯</button>
+              )}
+            </div>
+
+            {/* 點數區塊 */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "12px 16px", borderRadius: 14, marginBottom: 16,
+              background: "linear-gradient(90deg, #FFF6E8, #FFEFD6)", border: `1.5px solid #F0D9A8`,
+            }}>
+              <div>
+                <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "#A07A2E", letterSpacing: "0.4px" }}> 會員點數</div>
+                <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: "#8A6A20", marginTop: 2 }}>{settings.pointsEnabled ? `${member.points || 0} 點` : "0 點"}</div>
+              </div>
+              {settings.pointsEnabled
+                ? <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "#A07A2E", background: "#fff", borderRadius: 20, padding: "4px 10px", border: `1px solid #F0D9A8` }}>消費 NT${settings.pointsPerAmount || 0} 得 {settings.pointsPerAmountGet || 0} 點</span>
+                : <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "#A07A2E", background: "#fff", borderRadius: 20, padding: "4px 10px", border: `1px solid #F0D9A8` }}>集點功能尚未開放</span>
+              }
+            </div>
+
+            {!editing ? (
+              <>
+                <div style={{ borderTop: `1.5px solid ${C.line}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13 }}>
+                    <span style={{ color: C.inkMuted }}>手機號碼</span>
+                    <span style={{ color: C.ink, fontWeight: 700 }}>{member.phone}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13 }}>
+                    <span style={{ color: C.inkMuted }}>Line ID</span>
+                    <span style={{ color: C.ink, fontWeight: 700 }}>{member.lineId || "未填寫"}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13 }}>
+                    <span style={{ color: C.inkMuted }}>生日</span>
+                    <span style={{ color: C.ink, fontWeight: 700 }}>{member.birthday || "未填寫"}</span>
+                  </div>
+                </div>
+                <button onClick={onLogout} style={{ width: "100%", marginTop: 16, padding: "9px", borderRadius: 10, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, fontFamily: SANS, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>登出帳號</button>
+              </>
+            ) : (
+              <div style={{ borderTop: `1.5px solid ${C.line}`, paddingTop: 14 }}>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>姓名</div>
+                  <input style={inputSt} value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>Line ID</div>
+                  <input style={inputSt} value={draft.lineId} onChange={e => setDraft(d => ({ ...d, lineId: e.target.value }))} placeholder="選填" />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>生日</div>
+                  <input style={inputSt} type="date" value={draft.birthday} onChange={e => setDraft(d => ({ ...d, birthday: e.target.value }))} />
+                </div>
+                <div style={{ marginBottom: 4, padding: "8px 10px", borderRadius: 8, background: C.bg }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>手機號碼（帳號，不可修改）</div>
+                  <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginTop: 2 }}>{member.phone}</div>
+                </div>
+
+                {err && (
+                  <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: C.dangerLight }}>
+                    <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, margin: 0 }}>{err}</p>
+                  </div>
+                )}
+
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <Btn variant="ham" onClick={saveEdit} full disabled={busy}>{busy ? "儲存中…" : "儲存變更"}</Btn>
+                  <Btn variant="subtle" onClick={cancelEdit} disabled={busy}>取消</Btn>
+                </div>
+              </div>
+            )}
+          </TagCard>
+        </div>
+
+        {/* 修改密碼 */}
+        <div style={{ padding: "0 14px", marginBottom: 20 }}>
+          <TagCard style={{ padding: 20 }}>
+            {!changingPwd ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink }}>登入密碼</div>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 2 }}>定期更換密碼讓帳號更安全</div>
+                </div>
+                <button onClick={startChangePwd} style={{ background: "none", border: `1.5px solid ${C.line}`, borderRadius: 20, padding: "6px 14px", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 12, fontWeight: 700, flexShrink: 0 }}>修改密碼</button>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 14 }}>修改密碼</div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>目前的密碼</div>
+                  <input style={inputSt} type="password" value={oldPwd} onChange={e => setOldPwd(e.target.value)} placeholder="輸入現在使用的密碼" />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>新密碼</div>
+                  <input style={inputSt} type="password" value={newPwd} onChange={e => setNewPwd(e.target.value)} placeholder="至少 4 碼" />
+                </div>
+                <div style={{ marginBottom: 4 }}>
+                  <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>再次輸入新密碼</div>
+                  <input style={inputSt} type="password" value={newPwd2} onChange={e => setNewPwd2(e.target.value)} placeholder="請再輸入一次" />
+                </div>
+
+                {pwdErr && (
+                  <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: C.dangerLight }}>
+                    <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, margin: 0 }}>{pwdErr}</p>
+                  </div>
+                )}
+
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <Btn variant="ham" onClick={submitChangePwd} full disabled={pwdBusy}>{pwdBusy ? "更新中…" : "確認修改"}</Btn>
+                  <Btn variant="subtle" onClick={cancelChangePwd} disabled={pwdBusy}>取消</Btn>
+                </div>
+              </div>
+            )}
+            {pwdMsg && !changingPwd && (
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.leaf, marginTop: 10 }}> {pwdMsg}</p>
+            )}
+          </TagCard>
+        </div>
+
+        {/* 訂單列表 */}
+        <div style={{ padding: "0 14px 8px" }}>
+          <div style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink, marginBottom: 10 }}>我的訂單</div>
+        </div>
+        <div style={{ padding: "0 14px" }}>
           {orders.length === 0
             ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>還沒有訂單記錄</div>
             : orders.map(o => {
                 const s = SC[o.status] || SC.pending;
                 return (
-                  <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10 }}>
+                  <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10, cursor: "pointer" }} onClick={() => onViewOrder(o)}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                       <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>{o.id}</span>
                       <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color }}>{s.label}</span>
@@ -1433,7 +1900,7 @@ function MyOrdersScreen({ settings, orders, cart, onBack, onPolicyClick, onGoAdm
                     <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginBottom: 8, lineHeight: 1.6 }}>{o.items}</div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ink }}>{o.total}</span>
-                      <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>{o.date}</span>
+                      <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>{o.date} ›</span>
                     </div>
                   </TagCard>
                 );
@@ -1447,38 +1914,245 @@ function MyOrdersScreen({ settings, orders, cart, onBack, onPolicyClick, onGoAdm
 }
 
 /* ══════════════════════════════════════════
-   BOTTOM NAV
+   ORDER DETAIL — 單筆訂單詳情頁
 ══════════════════════════════════════════ */
-function BottomNav({ active, onHome, onCart, onOrders, cartCount }) {
-  const items = [
-    { id: "home",   label: "首頁",  icon: "", action: onHome },
-    { id: "cart",   label: "購物車",icon: "", action: onCart,   badge: cartCount },
-    { id: "orders", label: "訂單",  icon: "", action: onOrders },
-  ];
+function OrderDetailScreen({ settings, order, cart, onBack }) {
+  const SC = {
+    pending:   { label: "待確認", bg: C.warnLight,  color: C.warn,  desc: "店家正在確認您的訂單，請耐心等候" },
+    paid:      { label: "已付款", bg: C.leafLight,   color: C.leaf,  desc: "已收到您的款項，準備安排出貨" },
+    shipping:  { label: "待出貨", bg: "#EEF2FF",     color: "#4F5FAD", desc: "訂單已確認，正在準備出貨" },
+    shipped:   { label: "已出貨", bg: "#F3E8FF",     color: "#7C3AED", desc: "商品已寄出，請留意物流通知" },
+    ready:     { label: "可取貨", bg: C.hamLight,    color: C.ham,   desc: "商品已到貨，可前往指定地點取貨" },
+    done:      { label: "已完成", bg: C.bg,          color: C.inkSoft, desc: "訂單已完成，感謝您的購買" },
+    cancelled: { label: "已取消", bg: C.dangerLight, color: C.danger, desc: "此訂單已取消" },
+  };
+  const s = SC[order.status] || SC.pending;
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+
   return (
-    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.card, borderTop: `1.5px solid ${C.line}`, display: "flex", zIndex: 30 }}>
-      {items.map(it => (
-        <button key={it.id} onClick={it.action} style={{
-          flex: 1, display: "flex", flexDirection: "column", alignItems: "center",
-          gap: 3, padding: "10px 0 16px", border: "none", background: "none",
-          cursor: "pointer", color: active === it.id ? C.ham : C.inkSoft,
-          fontFamily: SANS, fontSize: 10, fontWeight: active === it.id ? 700 : 400,
-          position: "relative",
-        }}>
-          <span style={{ fontSize: 22, lineHeight: 1 }}>{it.icon}</span>
-          {it.label}
-          {it.badge > 0 && (
-            <span style={{ position: "absolute", top: 6, right: "calc(50% - 14px)", background: C.ham, color: "#fff", fontSize: 10, fontWeight: 700, width: 18, height: 18, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SANS }}>{it.badge}</span>
+    <div>
+      <div style={{ position: "sticky", top: 0, zIndex: 20 }}>
+        <StorefrontHeader settings={settings} cartCount={cartCount} onGoCart={() => {}} onGoAdmin={() => {}} />
+      </div>
+      <div style={{ maxWidth: 480, margin: "0 auto", paddingBottom: 100 }}>
+        <div style={{ padding: "16px 16px 0", display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontSize: 14, fontFamily: SANS, fontWeight: 700 }}>← 返回會員頁</button>
+        </div>
+
+        <div style={{ padding: "0 16px" }}>
+          {/* 狀態卡 */}
+          <TagCard style={{ padding: 20, marginBottom: 16, textAlign: "center" }}>
+            <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, padding: "5px 16px", borderRadius: 20, background: s.bg, color: s.color }}>{s.label}</span>
+            <p style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginTop: 10, lineHeight: 1.6 }}>{s.desc}</p>
+          </TagCard>
+
+          {/* 訂單編號與時間 */}
+          <TagCard style={{ padding: 18, marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>訂單編號</span>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.ink, fontWeight: 700 }}>{order.id}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>下單時間</span>
+              <span style={{ fontFamily: SANS, fontSize: 12, color: C.ink, fontWeight: 700 }}>{order.date}</span>
+            </div>
+          </TagCard>
+
+          {/* 商品明細 */}
+          <TagCard style={{ padding: 18, marginBottom: 16 }}>
+            <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 10 }}>商品明細</div>
+            <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, lineHeight: 1.8, marginBottom: 10 }}>{order.items}</div>
+            <div style={{ borderTop: `1.5px solid ${C.line}`, paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.ink }}>商品總額</span>
+              <span style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ham }}>{order.total}</span>
+            </div>
+          </TagCard>
+
+          {/* 取貨／付款資訊 */}
+          <TagCard style={{ padding: 18, marginBottom: 16 }}>
+            <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 10 }}>訂購資訊</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[
+                ["收件姓名", order.name],
+                ["聯絡電話", order.phone],
+                ["Line ID", order.lineId || "未填寫"],
+                ["取貨方式", order.pickup],
+                ["付款方式", order.pay],
+                ...(order.note ? [["備注", order.note]] : []),
+              ].map(([label, val]) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13 }}>
+                  <span style={{ color: C.inkMuted }}>{label}</span>
+                  <span style={{ color: C.ink, fontWeight: 700, textAlign: "right", maxWidth: "65%" }}>{val}</span>
+                </div>
+              ))}
+            </div>
+          </TagCard>
+
+          {/* 店家備注 */}
+          {order.adminNote && (
+            <TagCard style={{ padding: 18, background: C.hamLight, border: `1.5px solid ${C.hamMid}` }}>
+              <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 900, color: C.ham, marginBottom: 6 }}> 店家留言</div>
+              <p style={{ fontFamily: SANS, fontSize: 13, color: C.ink, lineHeight: 1.7, margin: 0 }}>{order.adminNote}</p>
+            </TagCard>
           )}
-        </button>
-      ))}
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ══════════════════════════════════════════
+   BOTTOM NAV
+══════════════════════════════════════════ */
+/* ══════════════════════════════════════════
    ADMIN LOGIN  — 6 位數字鍵盤
 ══════════════════════════════════════════ */
+/* ══════════════════════════════════════════
+   MEMBER AUTH — 會員登入／註冊
+══════════════════════════════════════════ */
+function MemberAuth({ settings, onAuthed, onBack, db }) {
+  const [mode, setMode] = useState("login"); // "login" | "register"
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [lineId, setLineIdField] = useState("");
+  const [birthday, setBirthday] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+
+  const inputSt = {
+    width: "100%", padding: "13px 16px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 15, outline: "none",
+  };
+
+  const handleLogin = async () => {
+    setErr("");
+    if (!isValidPhone(phone)) { setErr("請輸入正確的手機號碼格式（09xxxxxxxx）"); return; }
+    if (!password) { setErr("請輸入密碼"); return; }
+    setBusy(true);
+    try {
+      const { firestore, doc, getDoc } = db.current;
+      const snap = await getDoc(doc(firestore, "members", phone));
+      if (!snap.exists()) { setErr("此手機號碼尚未註冊，請先註冊會員"); setBusy(false); return; }
+      const member = snap.data();
+      const hashed = await hashPassword(password);
+      if (member.passwordHash !== hashed) { setErr("密碼錯誤，請再試一次"); setBusy(false); return; }
+      onAuthed({ phone, name: member.name, lineId: member.lineId || "", birthday: member.birthday || "" });
+    } catch (e) {
+      setErr("登入失敗，請檢查網路連線後再試一次");
+    }
+    setBusy(false);
+  };
+
+  const handleRegister = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("請輸入姓名"); return; }
+    if (!isValidPhone(phone)) { setErr("請輸入正確的手機號碼格式（09xxxxxxxx）"); return; }
+    if (password.length < 4) { setErr("密碼至少需 4 碼"); return; }
+    setBusy(true);
+    try {
+      const { firestore, doc, getDoc, setDoc } = db.current;
+      const snap = await getDoc(doc(firestore, "members", phone));
+      if (snap.exists()) { setErr("此手機號碼已經註冊過了，請直接登入"); setBusy(false); return; }
+      const hashed = await hashPassword(password);
+      const member = { phone, name: name.trim(), lineId: lineId.trim(), birthday: birthday || "", passwordHash: hashed, createdAt: new Date().toISOString() };
+      await setDoc(doc(firestore, "members", phone), member);
+      onAuthed({ phone, name: member.name, lineId: member.lineId, birthday: member.birthday });
+    } catch (e) {
+      setErr("註冊失敗，請檢查網路連線後再試一次");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh" }}>
+      <div style={{ maxWidth: 420, margin: "0 auto", padding: "50px 24px 40px" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 30 }}>← 返回購物</button>
+
+        <div style={{ textAlign: "center", marginBottom: 30 }}>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>{settings.shopEmoji || ""}</div>
+          <h2 style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink, marginBottom: 6 }}>
+            {mode === "login" ? "會員登入" : "註冊新帳號"}
+          </h2>
+          <p style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>
+            {mode === "login" ? "登入查看您的訂單記錄" : "建立帳號，訂單記錄永久保存"}
+          </p>
+        </div>
+
+        <TagCard style={{ padding: 22 }}>
+          {mode === "register" && (
+            <div style={{ marginBottom: 14 }}>
+              <FieldLabel>姓名</FieldLabel>
+              <input style={inputSt} value={name} onChange={e => setName(e.target.value)} placeholder="您的姓名" />
+            </div>
+          )}
+          <div style={{ marginBottom: 14 }}>
+            <FieldLabel>手機號碼</FieldLabel>
+            <input style={inputSt} type="tel" inputMode="numeric" maxLength={10} value={phone} onChange={e => { if (/^\d{0,10}$/.test(e.target.value)) setPhone(e.target.value); }} placeholder="09xxxxxxxx" />
+          </div>
+          {mode === "register" && (
+            <div style={{ marginBottom: 14 }}>
+              <FieldLabel>Line ID <span style={{ fontWeight: 400, color: C.inkMuted }}>（選填）</span></FieldLabel>
+              <input style={inputSt} value={lineId} onChange={e => setLineIdField(e.target.value)} placeholder="方便店家聯繫您" />
+            </div>
+          )}
+          {mode === "register" && (
+            <div style={{ marginBottom: 14 }}>
+              <FieldLabel>生日 <span style={{ fontWeight: 400, color: C.inkMuted }}>（選填，生日當月可能享有優惠）</span></FieldLabel>
+              <input style={inputSt} type="date" value={birthday} onChange={e => setBirthday(e.target.value)} />
+            </div>
+          )}
+          <div style={{ marginBottom: 8 }}>
+            <FieldLabel>密碼</FieldLabel>
+            <input style={inputSt} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder={mode === "register" ? "至少 4 碼" : "請輸入密碼"} />
+          </div>
+
+          {mode === "login" && (
+            <div style={{ textAlign: "right", marginBottom: 4 }}>
+              <button
+                onClick={() => setShowForgot(s => !s)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: C.inkMuted, fontFamily: SANS, fontSize: 12, textDecoration: "underline" }}
+              >忘記密碼？</button>
+            </div>
+          )}
+
+          {mode === "login" && showForgot && (
+            <div style={{ marginBottom: 10, padding: "10px 14px", borderRadius: 10, background: C.bg, border: `1px dashed ${C.line}` }}>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, lineHeight: 1.8, margin: 0 }}>
+                請透過 Line 私訊店家告知您的手機號碼，店家會為您重設一組臨時密碼。登入後請至「我的會員」→「修改密碼」設定您自己的新密碼。
+                {settings.lineId && <><br />Line：<b style={{ color: C.ink }}>{settings.lineId}</b></>}
+              </p>
+            </div>
+          )}
+
+          {err && (
+            <div style={{ marginTop: 10, padding: "10px 14px", borderRadius: 10, background: C.dangerLight, border: `1.5px solid ${C.danger}40` }}>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, margin: 0, lineHeight: 1.6 }}>{err}</p>
+            </div>
+          )}
+
+          <div style={{ marginTop: 18 }}>
+            <Btn variant="ham" full disabled={busy} onClick={mode === "login" ? handleLogin : handleRegister}>
+              {busy ? "處理中…" : mode === "login" ? "登入" : "註冊"}
+            </Btn>
+          </div>
+        </TagCard>
+
+        <div style={{ textAlign: "center", marginTop: 18 }}>
+          <button
+            onClick={() => { setMode(m => m === "login" ? "register" : "login"); setErr(""); setShowForgot(false); }}
+            style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 13, fontWeight: 700 }}
+          >
+            {mode === "login" ? "還沒有帳號？點此註冊" : "已經有帳號？點此登入"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminLogin({ settings, onAuthed, onBack }) {
   const [digits, setDigits] = useState([]);   // max 6
   const [shake,  setShake]  = useState(false);
@@ -1597,12 +2271,14 @@ function AdminLogin({ settings, onAuthed, onBack }) {
 /* ══════════════════════════════════════════
    ADMIN DASHBOARD
 ══════════════════════════════════════════ */
-function AdminDashboard({ settings, products, cats, orders, onUpdateSettings, onUpdateProducts, onUpdateCats, onUpdateOrderStatus, onUpdateOrderNote, onLogout }) {
+function AdminDashboard({ settings, products, cats, orders, members, onUpdateSettings, onUpdateProducts, onUpdateCats, onUpdateOrderStatus, onUpdateOrderNote, onDeleteOrder, onUpdatePoints, onResetPassword, onApplyStockRepair, onLogout }) {
   const [tab, setTab] = useState("orders");
 
   const TABS = [
     { id: "orders",   label: "訂單管理", icon: "" },
     { id: "products", label: "商品管理", icon: "" },
+    { id: "members",  label: "會員管理", icon: "" },
+    { id: "reports",  label: "營收報表", icon: "" },
     { id: "settings", label: "店家設定", icon: "" },
   ];
 
@@ -1623,14 +2299,14 @@ function AdminDashboard({ settings, products, cats, orders, onUpdateSettings, on
 
       {/* Tab bar */}
       <div style={{ background: C.card, borderBottom: `1.5px solid ${C.line}` }}>
-        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex" }}>
+        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex", overflowX: "auto" }}>
           {TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
-              flex: 1, padding: "14px 8px", border: "none", background: "none",
+              flex: "1 0 auto", minWidth: 84, padding: "14px 8px", border: "none", background: "none",
               borderBottom: tab === t.id ? `3px solid ${C.forest}` : "3px solid transparent",
               color: tab === t.id ? C.forest : C.inkSoft,
               fontFamily: SANS, fontSize: 13, fontWeight: tab === t.id ? 700 : 400,
-              cursor: "pointer", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              cursor: "pointer", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap",
             }}>
               <span>{t.icon}</span><span>{t.label}</span>
             </button>
@@ -1639,8 +2315,10 @@ function AdminDashboard({ settings, products, cats, orders, onUpdateSettings, on
       </div>
 
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "20px 16px 60px" }}>
-        {tab === "orders"   && <AdminOrders settings={settings} products={products} orders={orders} onUpdateStatus={onUpdateOrderStatus} onUpdateNote={onUpdateOrderNote} />}
-        {tab === "products" && <AdminProducts products={products} cats={cats} onUpdateProducts={onUpdateProducts} onUpdateCats={onUpdateCats} />}
+        {tab === "orders"   && <AdminOrders settings={settings} products={products} orders={orders} onUpdateStatus={onUpdateOrderStatus} onUpdateNote={onUpdateOrderNote} onDeleteOrder={onDeleteOrder} />}
+        {tab === "products" && <AdminProducts products={products} cats={cats} orders={orders} onUpdateProducts={onUpdateProducts} onUpdateCats={onUpdateCats} onApplyStockRepair={onApplyStockRepair} />}
+        {tab === "members"  && <AdminMembers members={members} orders={orders} settings={settings} onUpdatePoints={onUpdatePoints} onResetPassword={onResetPassword} />}
+        {tab === "reports"  && <AdminReports orders={orders} />}
         {tab === "settings" && <AdminSettings settings={settings} onSave={onUpdateSettings} />}
       </div>
     </div>
@@ -1648,7 +2326,365 @@ function AdminDashboard({ settings, products, cats, orders, onUpdateSettings, on
 }
 
 /* ── Admin: Orders ── */
-function AdminOrders({ settings, products, orders, onUpdateStatus, onUpdateNote }) {
+/* ══════════════════════════════════════════
+   ADMIN: MEMBERS — 會員管理
+══════════════════════════════════════════ */
+function AdminMembers({ members, orders, settings, onUpdatePoints, onResetPassword }) {
+  const [query, setQuery] = useState("");
+  const [detailPhone, setDetailPhone] = useState(null);
+  const [pointsInput, setPointsInput] = useState("");
+  const [pointsBusy, setPointsBusy] = useState(false);
+  const [newPwd, setNewPwd] = useState("");
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [pwdMsg, setPwdMsg] = useState("");
+
+  const inputSt = {
+    width: "100%", padding: "11px 14px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 14, outline: "none",
+  };
+
+  const ordersOf = phone => orders.filter(o => o.memberPhone === phone || o.phone === phone);
+
+  const filtered = members.filter(m => {
+    const q = query.trim();
+    if (!q) return true;
+    return (m.name || "").includes(q) || (m.phone || "").includes(q) || (m.lineId || "").includes(q);
+  });
+
+  const adjustPoints = async (phone, delta) => {
+    setPointsBusy(true);
+    try { await onUpdatePoints(phone, delta); } catch (e) { alert("點數更新失敗，請稍後再試"); }
+    setPointsBusy(false);
+  };
+  const setPointsExact = async (phone) => {
+    const n = Number(pointsInput);
+    if (isNaN(n)) { alert("請輸入有效數字"); return; }
+    setPointsBusy(true);
+    try { await onUpdatePoints(phone, n, true); setPointsInput(""); } catch (e) { alert("點數更新失敗，請稍後再試"); }
+    setPointsBusy(false);
+  };
+  const handleResetPwd = async (phone) => {
+    if (newPwd.length < 4) { setPwdMsg("密碼至少需 4 碼"); return; }
+    setPwdBusy(true);
+    setPwdMsg("");
+    try {
+      await onResetPassword(phone, newPwd);
+      setPwdMsg("已重設成功，請告知會員新密碼");
+      setNewPwd("");
+    } catch (e) {
+      setPwdMsg("重設失敗，請稍後再試");
+    }
+    setPwdBusy(false);
+  };
+
+  // 詳情頁
+  if (detailPhone) {
+    const m = members.find(x => x.phone === detailPhone);
+    if (!m) { setDetailPhone(null); return null; }
+    const mOrders = ordersOf(m.phone).sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    const totalSpent = mOrders.filter(o => o.status !== "cancelled").reduce((acc, o) => acc + (Number(String(o.total).replace(/[^\d]/g,"")) || 0), 0);
+    const SC = {
+      pending:  { label: "待確認", bg: C.warnLight,   color: C.warn },
+      paid:     { label: "已付款", bg: C.leafLight,    color: C.leaf },
+      shipping: { label: "待出貨", bg: "#EEF2FF",      color: "#4F5FAD" },
+      shipped:  { label: "已出貨", bg: "#F3E8FF",      color: "#7C3AED" },
+      ready:    { label: "可取貨", bg: C.hamLight,     color: C.ham  },
+      done:     { label: "已完成", bg: C.bg,           color: C.inkSoft },
+      cancelled:{ label: "已取消", bg: C.dangerLight,  color: C.danger },
+    };
+    return (
+      <div>
+        <button onClick={() => setDetailPhone(null)} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 16 }}>← 返回會員列表</button>
+
+        <TagCard style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+            <div style={{ width: 48, height: 48, borderRadius: "50%", background: C.hamLight, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontSize: 20, fontWeight: 900, color: C.ham, flexShrink: 0 }}>{m.name?.[0] || ""}</div>
+            <div>
+              <div style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 900, color: C.ink }}>{m.name}</div>
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginTop: 2 }}>{m.phone}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: `1.5px solid ${C.line}`, paddingTop: 14 }}>
+            {[
+              ["Line ID", m.lineId || "未填寫"],
+              ["生日", m.birthday || "未填寫"],
+              ["註冊時間", m.createdAt ? new Date(m.createdAt).toLocaleString("zh-TW") : "—"],
+            ].map(([label, val]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 13 }}>
+                <span style={{ color: C.inkMuted }}>{label}</span>
+                <span style={{ color: C.ink, fontWeight: 700 }}>{val}</span>
+              </div>
+            ))}
+          </div>
+        </TagCard>
+
+        {/* 會員點數管理 */}
+        <TagCard style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: "#A07A2E", letterSpacing: "0.4px" }}> 會員點數</div>
+              <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: "#8A6A20", marginTop: 2 }}>{m.points || 0} 點</div>
+            </div>
+            {!settings.pointsEnabled && (
+              <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted, background: C.bg, borderRadius: 20, padding: "4px 10px" }}>集點功能尚未開放</span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <Btn small variant="subtle" onClick={() => adjustPoints(m.phone, -10)} disabled={pointsBusy}>−10</Btn>
+            <Btn small variant="subtle" onClick={() => adjustPoints(m.phone, -1)} disabled={pointsBusy}>−1</Btn>
+            <Btn small variant="subtle" onClick={() => adjustPoints(m.phone, 1)} disabled={pointsBusy}>+1</Btn>
+            <Btn small variant="subtle" onClick={() => adjustPoints(m.phone, 10)} disabled={pointsBusy}>+10</Btn>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="number" placeholder="直接設定點數"
+              value={pointsInput} onChange={e => setPointsInput(e.target.value)}
+              style={{ ...inputSt, flex: 1 }}
+            />
+            <Btn small variant="ham" onClick={() => setPointsExact(m.phone)} disabled={pointsBusy || pointsInput === ""}>設定</Btn>
+          </div>
+        </TagCard>
+
+        {/* 重設密碼 */}
+        <TagCard style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 4 }}> 重設密碼</div>
+          <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginBottom: 12, lineHeight: 1.6 }}>會員忘記密碼時，可在此直接設定新密碼，再請會員自行登入後修改。</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text" placeholder="輸入新密碼（至少 4 碼）"
+              value={newPwd} onChange={e => { setNewPwd(e.target.value); setPwdMsg(""); }}
+              style={{ ...inputSt, flex: 1 }}
+            />
+            <Btn small variant="ham" onClick={() => handleResetPwd(m.phone)} disabled={pwdBusy || newPwd.length < 4}>{pwdBusy ? "處理中…" : "重設"}</Btn>
+          </div>
+          {pwdMsg && (
+            <p style={{ fontFamily: SANS, fontSize: 12, color: pwdMsg.includes("成功") ? C.leaf : C.danger, marginTop: 8 }}>{pwdMsg}</p>
+          )}
+        </TagCard>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+          <TagCard style={{ padding: "14px 16px" }}>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>累計訂單數</div>
+            <div style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 900, color: C.forest }}>{mOrders.length}</div>
+          </TagCard>
+          <TagCard style={{ padding: "14px 16px" }}>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>累計消費</div>
+            <div style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 900, color: C.ham }}>{money(totalSpent)}</div>
+          </TagCard>
+        </div>
+
+        <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 10 }}>訂單記錄</div>
+        {mOrders.length === 0
+          ? <div style={{ textAlign: "center", padding: "40px 20px", color: C.inkMuted, fontFamily: SANS, fontSize: 13 }}>尚無訂單記錄</div>
+          : mOrders.map(o => {
+              const s = SC[o.status] || SC.pending;
+              return (
+                <TagCard key={o._fireId || o.id} style={{ padding: "12px 14px", marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>{o.id}</span>
+                    <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color }}>{s.label}</span>
+                  </div>
+                  <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 6, lineHeight: 1.6 }}>{o.items}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{o.total}</span>
+                    <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>{o.date}</span>
+                  </div>
+                </TagCard>
+              );
+            })
+        }
+      </div>
+    );
+  }
+
+  // 列表頁
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+        <TagCard style={{ padding: "14px 16px" }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>會員總數</div>
+          <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.forest }}>{members.length}</div>
+        </TagCard>
+        <TagCard style={{ padding: "14px 16px" }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>下過單的會員</div>
+          <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 900, color: C.ham }}>{members.filter(m => ordersOf(m.phone).length > 0).length}</div>
+        </TagCard>
+      </div>
+
+      <input
+        style={{ ...inputSt, marginBottom: 16 }}
+        placeholder="搜尋姓名、手機號碼或 Line ID"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+      />
+
+      {filtered.length === 0
+        ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>{members.length === 0 ? "目前還沒有會員註冊" : "找不到符合的會員"}</div>
+        : filtered.map(m => {
+            const cnt = ordersOf(m.phone).length;
+            return (
+              <TagCard key={m.phone} style={{ padding: "14px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }} onClick={() => { setDetailPhone(m.phone); setNewPwd(""); setPwdMsg(""); }}>
+                <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.hamLight, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: C.ham, flexShrink: 0 }}>{m.name?.[0] || ""}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{m.name}</div>
+                  <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginTop: 2 }}>{m.phone}{m.lineId ? ` · Line: ${m.lineId}` : ""}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0, display: "flex", gap: 14 }}>
+                  <div>
+                    <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>訂單數</div>
+                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: C.forest }}>{cnt}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>點數</div>
+                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: "#A07A2E" }}>{m.points || 0}</div>
+                  </div>
+                </div>
+              </TagCard>
+            );
+          })
+      }
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   ADMIN: REPORTS — 簡易營收報表
+══════════════════════════════════════════ */
+function AdminReports({ orders }) {
+  const [monthFilter, setMonthFilter] = useState("all");
+
+  const inputSt = {
+    width: "100%", padding: "10px 14px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none",
+  };
+
+  const monthKeyOf = o => {
+    if (o.createdAt?.seconds) {
+      const d = new Date(o.createdAt.seconds * 1000);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    return "unknown";
+  };
+  const monthLabelOf = key => {
+    if (key === "unknown") return "未知月份";
+    const [y, m] = key.split("-");
+    return `${y} 年 ${Number(m)} 月`;
+  };
+  const amountOf = o => Number(String(o.total).replace(/[^\d]/g, "")) || 0;
+
+  const monthOptions = Array.from(new Set(orders.map(monthKeyOf))).sort((a, b) => b.localeCompare(a));
+  const valid = orders.filter(o => o.status !== "cancelled");
+  const scoped = monthFilter === "all" ? valid : valid.filter(o => monthKeyOf(o) === monthFilter);
+
+  // 核心統計
+  const revenue = scoped.reduce((acc, o) => acc + amountOf(o), 0);
+  const orderCount = scoped.length;
+  const avgOrder = orderCount > 0 ? Math.round(revenue / orderCount) : 0;
+
+  // 熱銷商品排行：解析 items 字串「商品名 x數量、商品名（規格）x數量」
+  const productCount = {};
+  scoped.forEach(o => {
+    (o.items || "").split("、").forEach(seg => {
+      const m = seg.match(/^(.+?)\s*[xX×]\s*(\d+)$/);
+      if (m) {
+        const name = m[1].trim();
+        const qty = Number(m[2]) || 0;
+        productCount[name] = (productCount[name] || 0) + qty;
+      }
+    });
+  });
+  const topProducts = Object.entries(productCount).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxQty = topProducts.length > 0 ? topProducts[0][1] : 1;
+
+  // 依月份的營收趨勢（最近 6 個月，由舊到新）
+  const trendKeys = monthOptions.slice(0, 6).reverse();
+  const trendData = trendKeys.map(k => ({
+    key: k,
+    label: monthLabelOf(k).replace(" 年 ", "/").replace(" 月", ""),
+    revenue: valid.filter(o => monthKeyOf(o) === k).reduce((acc, o) => acc + amountOf(o), 0),
+  }));
+  const maxTrend = Math.max(1, ...trendData.map(t => t.revenue));
+
+  return (
+    <div>
+      {/* 月份篩選 */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>檢視月份</div>
+        <select value={monthFilter} onChange={e => setMonthFilter(e.target.value)} style={inputSt}>
+          <option value="all">全部時間</option>
+          {monthOptions.map(k => <option key={k} value={k}>{monthLabelOf(k)}</option>)}
+        </select>
+      </div>
+
+      {/* 核心數字 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <TagCard style={{ padding: "16px 18px" }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>{monthFilter === "all" ? "總營收" : "本月營收"}</div>
+          <div style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 900, color: C.ham }}>{money(revenue)}</div>
+        </TagCard>
+        <TagCard style={{ padding: "16px 18px" }}>
+          <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>有效訂單數</div>
+          <div style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 900, color: C.forest }}>{orderCount}</div>
+        </TagCard>
+      </div>
+      <TagCard style={{ padding: "16px 18px", marginBottom: 20 }}>
+        <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>平均訂單金額</div>
+        <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 900, color: C.ink }}>{money(avgOrder)}</div>
+      </TagCard>
+
+      {/* 月營收趨勢（近 6 個月） */}
+      {trendData.length > 0 && (
+        <TagCard style={{ padding: 18, marginBottom: 20 }}>
+          <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 14 }}>近月營收趨勢</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, height: 100 }}>
+            {trendData.map(t => (
+              <div key={t.key} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                <div style={{ fontFamily: SANS, fontSize: 10, color: C.inkMuted, marginBottom: 4 }}>{t.revenue > 0 ? Math.round(t.revenue/1000) + "k" : "0"}</div>
+                <div style={{
+                  width: "100%", maxWidth: 32, borderRadius: "6px 6px 0 0",
+                  background: t.key === monthFilter ? C.ham : C.hamMid,
+                  height: `${Math.max(4, (t.revenue / maxTrend) * 70)}px`,
+                  transition: "height .3s",
+                }} />
+                <div style={{ fontFamily: SANS, fontSize: 10, color: C.inkSoft, marginTop: 6 }}>{t.label}</div>
+              </div>
+            ))}
+          </div>
+        </TagCard>
+      )}
+
+      {/* 熱銷商品 TOP5 */}
+      <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ink, marginBottom: 10 }}>熱銷商品 TOP5</div>
+      {topProducts.length === 0
+        ? <div style={{ textAlign: "center", padding: "40px 20px", color: C.inkMuted, fontFamily: SANS, fontSize: 13 }}>此區間尚無銷售紀錄</div>
+        : (
+          <TagCard style={{ padding: 18 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {topProducts.map(([name, qty], i) => (
+                <div key={name}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                    <span style={{ fontFamily: SANS, fontSize: 13, color: C.ink, fontWeight: i === 0 ? 700 : 400 }}>
+                      <span style={{ color: i === 0 ? C.ham : C.inkMuted, fontWeight: 900, marginRight: 6 }}>{i + 1}</span>
+                      {name}
+                    </span>
+                    <span style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 700, color: C.ham }}>{qty} 件</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 4, background: C.bg, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(qty / maxQty) * 100}%`, background: i === 0 ? C.ham : C.hamMid, borderRadius: 4 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </TagCard>
+        )
+      }
+    </div>
+  );
+}
+
+function AdminOrders({ settings, products, orders, onUpdateStatus, onUpdateNote, onDeleteOrder }) {
   const SC = {
     pending:  { label: "待確認", bg: C.warnLight,   color: C.warn },
     paid:     { label: "已付款", bg: C.leafLight,    color: C.leaf },
@@ -1665,9 +2701,63 @@ function AdminOrders({ settings, products, orders, onUpdateStatus, onUpdateNote 
   const nextStatus = s => { const i = FLOW.indexOf(s); return i >= 0 && i < FLOW.length-1 ? FLOW[i+1] : null; };
 
   const [confirmCancel, setConfirmCancel] = useState(null); // orderId
+  const [confirmDelete, setConfirmDelete] = useState(null); // orderId
+  const [deleting, setDeleting] = useState(false);
+  const [monthFilter, setMonthFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [query, setQuery] = useState("");
+
+  const inputSt = {
+    width: "100%", padding: "10px 14px", borderRadius: 12,
+    border: `1.5px solid ${C.line}`, background: "#fff",
+    color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none",
+  };
+
+  // 取得訂單的月份 key（依 createdAt，沒有則 fallback 用 date 字串）
+  const monthKeyOf = o => {
+    if (o.createdAt?.seconds) {
+      const d = new Date(o.createdAt.seconds * 1000);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    return "unknown";
+  };
+  const monthLabelOf = key => {
+    if (key === "unknown") return "未知月份";
+    const [y, m] = key.split("-");
+    return `${y} 年 ${Number(m)} 月`;
+  };
 
   // 統計（排除取消）
   const active = orders.filter(o => o.status !== "cancelled");
+
+  // 可選月份清單（由新到舊）
+  const monthOptions = Array.from(new Set(orders.map(monthKeyOf))).sort((a, b) => b.localeCompare(a));
+
+  // 篩選後的訂單
+  const filtered = orders.filter(o => {
+    if (monthFilter !== "all" && monthKeyOf(o) !== monthFilter) return false;
+    if (statusFilter !== "all" && o.status !== statusFilter) return false;
+    const q = query.trim();
+    if (q && !(
+      (o.name || "").includes(q) ||
+      (o.phone || "").includes(q) ||
+      (o.id || "").includes(q) ||
+      (o.items || "").includes(q)
+    )) return false;
+    return true;
+  });
+
+  // 依月份分組
+  const grouped = {};
+  filtered.forEach(o => {
+    const key = monthKeyOf(o);
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(o);
+  });
+  const monthKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+
+  // 該月小計金額（排除取消）
+  const monthTotal = list => list.filter(o => o.status !== "cancelled").reduce((acc, o) => acc + (Number(String(o.total).replace(/[^\d]/g,"")) || 0), 0);
 
   return (
     <div>
@@ -1686,112 +2776,279 @@ function AdminOrders({ settings, products, orders, onUpdateStatus, onUpdateNote 
         ))}
       </div>
 
-      {orders.length === 0
-        ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>目前還沒有訂單</div>
-        : orders.map(o => {
-            const s = SC[o.status] || SC.pending;
-            const ns = nextStatus(o.status);
-            const ps = prevStatus(o.status);
-            const isCancelled = o.status === "cancelled";
-            return (
-              <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10, opacity: isCancelled ? 0.6 : 1 }}>
+      {/* 篩選工具列 */}
+      <TagCard style={{ padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+          <div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>月份</div>
+            <select value={monthFilter} onChange={e => setMonthFilter(e.target.value)} style={inputSt}>
+              <option value="all">全部月份</option>
+              {monthOptions.map(k => <option key={k} value={k}>{monthLabelOf(k)}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>狀態</div>
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={inputSt}>
+              <option value="all">全部狀態</option>
+              {Object.entries(SC).map(([key, v]) => <option key={key} value={key}>{v.label}</option>)}
+            </select>
+          </div>
+        </div>
+        <input
+          style={inputSt}
+          placeholder="搜尋姓名、電話、訂單編號或商品"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+        />
+        {(monthFilter !== "all" || statusFilter !== "all" || query.trim()) && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+            <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>符合 {filtered.length} 筆訂單</span>
+            <button onClick={() => { setMonthFilter("all"); setStatusFilter("all"); setQuery(""); }} style={{ background: "none", border: "none", cursor: "pointer", color: C.ham, fontFamily: SANS, fontSize: 12, fontWeight: 700 }}>清除篩選</button>
+          </div>
+        )}
+      </TagCard>
 
-                {/* 頂部：姓名 + 狀態 */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                  <div>
-                    <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ink }}>{o.name}</span>
-                    <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginLeft: 8 }}>{o.id}</span>
-                  </div>
-                  <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color, whiteSpace: "nowrap" }}>{s.label}</span>
+      {filtered.length === 0
+        ? <div style={{ textAlign: "center", padding: "60px 20px", color: C.inkSoft, fontFamily: SANS }}>{orders.length === 0 ? "目前還沒有訂單" : "沒有符合篩選條件的訂單"}</div>
+        : monthKeys.map(mKey => (
+            <div key={mKey} style={{ marginBottom: 24 }}>
+              {/* 月份標題列 */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "0 2px" }}>
+                <div style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>{monthLabelOf(mKey)}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted }}>{grouped[mKey].length} 筆</span>
+                  <span style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 900, color: C.ham }}>{money(monthTotal(grouped[mKey]))}</span>
                 </div>
+              </div>
 
-                {/* 訂單資訊 */}
-                <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginBottom: 4 }}>{o.items}</div>
-                <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginBottom: 8 }}>
-                  {o.pickup} · {o.pay} · <span style={{ fontFamily: SERIF, fontWeight: 700, color: C.ink }}>{o.total}</span>
-                </div>
-                {o.phone    && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>電話：{o.phone}</div>}
-                {o.lineId   && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>Line ID：{o.lineId}</div>}
-                {o.lineName && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8 }}>社群暱稱：{o.lineName}</div>}
-                {o.note     && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8, padding: "6px 10px", background: C.bg, borderRadius: 8 }}> 客人備注：{o.note}</div>}
+              {grouped[mKey].map(o => {
+                const s = SC[o.status] || SC.pending;
+                const ns = nextStatus(o.status);
+                const ps = prevStatus(o.status);
+                const isCancelled = o.status === "cancelled";
+                return (
+                  <TagCard key={o.id} style={{ padding: "14px 16px", marginBottom: 10, opacity: isCancelled ? 0.6 : 1 }}>
 
-                {/* 店家備注 */}
-                {!isCancelled && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted, letterSpacing: "0.4px", textTransform: "uppercase", marginBottom: 5 }}>店家備注</div>
-                    <textarea
-                      value={o.adminNote || ""}
-                      onChange={e => onUpdateNote(o.id, e.target.value)}
-                      placeholder="記錄付款進度、特殊注意事項…"
-                      rows={2}
-                      style={{
-                        width: "100%", padding: "8px 12px", borderRadius: 8, resize: "vertical",
-                        border: `1.5px solid ${o.adminNote ? C.ham : C.line}`,
-                        background: o.adminNote ? C.hamLight : "#fff",
-                        color: C.ink, fontFamily: SANS, fontSize: 12, outline: "none",
-                        transition: "border-color .15s, background .15s",
-                      }}
-                    />
-                  </div>
-                )}
+                    {/* 頂部：姓名 + 狀態 */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                      <div>
+                        <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, color: C.ink }}>{o.name}</span>
+                        <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginLeft: 8 }}>{o.id}</span>
+                      </div>
+                      <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.color, whiteSpace: "nowrap" }}>{s.label}</span>
+                    </div>
 
-                {/* 操作按鈕列 */}
-                {!isCancelled && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
-                    {/* 退回上一步 */}
-                    {ps && (
-                      <button onClick={() => onUpdateStatus(o.id, ps)} style={{
-                        padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS,
-                        border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft,
-                        cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
-                      }}>← 退回「{SC[ps].label}」</button>
+                    {/* 訂單資訊 */}
+                    <div style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft, marginBottom: 4 }}>{o.items}</div>
+                    <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, marginBottom: 8 }}>
+                      {o.pickup} · {o.pay} · <span style={{ fontFamily: SERIF, fontWeight: 700, color: C.ink }}>{o.total}</span>
+                      <span style={{ marginLeft: 8, color: C.inkMuted }}>{o.date}</span>
+                    </div>
+                    {o.phone    && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>電話：{o.phone}</div>}
+                    {o.lineId   && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 3 }}>Line ID：{o.lineId}</div>}
+                    {o.lineName && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8 }}>社群暱稱：{o.lineName}</div>}
+                    {o.note     && <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, marginBottom: 8, padding: "6px 10px", background: C.bg, borderRadius: 8 }}> 客人備注：{o.note}</div>}
+                    {o.pointsAwarded > 0 && <div style={{ fontFamily: SANS, fontSize: 12, color: "#A07A2E", marginBottom: 8 }}> 已自動加點 {o.pointsAwarded} 點</div>}
+
+                    {/* 店家備注 */}
+                    {!isCancelled && (
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, color: C.inkMuted, letterSpacing: "0.4px", textTransform: "uppercase", marginBottom: 5 }}>店家備注</div>
+                        <textarea
+                          value={o.adminNote || ""}
+                          onChange={e => onUpdateNote(o.id, e.target.value)}
+                          placeholder="記錄付款進度、特殊注意事項…"
+                          rows={2}
+                          style={{
+                            width: "100%", padding: "8px 12px", borderRadius: 8, resize: "vertical",
+                            border: `1.5px solid ${o.adminNote ? C.ham : C.line}`,
+                            background: o.adminNote ? C.hamLight : "#fff",
+                            color: C.ink, fontFamily: SANS, fontSize: 12, outline: "none",
+                            transition: "border-color .15s, background .15s",
+                          }}
+                        />
+                      </div>
                     )}
-                    {/* 前進下一步 */}
-                    {ns && (
-                      <button onClick={() => onUpdateStatus(o.id, ns)} style={{
-                        padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700,
-                        border: "none", background: C.forest, color: "#fff",
-                        cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
-                      }}>標記「{SC[ns].label}」→</button>
-                    )}
-                    {/* 取消訂單 */}
-                    {confirmCancel === o.id
-                      ? <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-                          <span style={{ fontFamily: SANS, fontSize: 12, color: C.danger }}>確定取消？</span>
-                          <button onClick={() => { onUpdateStatus(o.id, "cancelled"); setConfirmCancel(null); }} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700, border: "none", background: C.danger, color: "#fff", cursor: "pointer" }}>確定</button>
-                          <button onClick={() => setConfirmCancel(null)} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>返回</button>
-                        </div>
-                      : <button onClick={() => setConfirmCancel(o.id)} style={{ marginLeft: "auto", padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.danger}40`, background: C.dangerLight, color: C.danger, cursor: "pointer" }}>取消訂單</button>
-                    }
-                  </div>
-                )}
 
-                {/* 已取消：可恢復 */}
-                {isCancelled && (
-                  <div style={{ paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
-                    <button onClick={() => onUpdateStatus(o.id, "pending")} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>恢復為待確認</button>
-                  </div>
-                )}
-              </TagCard>
-            );
-          })
+                    {/* 操作按鈕列 */}
+                    {!isCancelled && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+                        {/* 退回上一步 */}
+                        {ps && (
+                          <button onClick={() => onUpdateStatus(o.id, ps)} style={{
+                            padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS,
+                            border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft,
+                            cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+                          }}>← 退回「{SC[ps].label}」</button>
+                        )}
+                        {/* 前進下一步 */}
+                        {ns && (
+                          <button onClick={() => onUpdateStatus(o.id, ns)} style={{
+                            padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700,
+                            border: "none", background: C.forest, color: "#fff",
+                            cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+                          }}>標記「{SC[ns].label}」→</button>
+                        )}
+                        {/* 取消訂單 */}
+                        {confirmCancel === o.id
+                          ? <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                              <span style={{ fontFamily: SANS, fontSize: 12, color: C.danger }}>確定取消？</span>
+                              <button onClick={() => { onUpdateStatus(o.id, "cancelled"); setConfirmCancel(null); }} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700, border: "none", background: C.danger, color: "#fff", cursor: "pointer" }}>確定</button>
+                              <button onClick={() => setConfirmCancel(null)} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>返回</button>
+                            </div>
+                          : <button onClick={() => setConfirmCancel(o.id)} style={{ marginLeft: "auto", padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.danger}40`, background: C.dangerLight, color: C.danger, cursor: "pointer" }}>取消訂單</button>
+                        }
+                      </div>
+                    )}
+
+                    {/* 已取消：可恢復 + 永久刪除 */}
+                    {isCancelled && (
+                      <div style={{ paddingTop: 10, borderTop: `1px solid ${C.line}`, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        <button onClick={() => onUpdateStatus(o.id, "pending")} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>恢復為待確認</button>
+                        {confirmDelete === o.id ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                            <span style={{ fontFamily: SANS, fontSize: 12, color: C.danger, fontWeight: 700 }}>永久刪除無法復原？</span>
+                            <button
+                              onClick={async () => { setDeleting(true); await onDeleteOrder(o.id); setDeleting(false); setConfirmDelete(null); }}
+                              disabled={deleting}
+                              style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, fontWeight: 700, border: "none", background: C.danger, color: "#fff", cursor: "pointer" }}
+                            >{deleting ? "刪除中…" : "確定刪除"}</button>
+                            <button onClick={() => setConfirmDelete(null)} disabled={deleting} style={{ padding: "5px 10px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.line}`, background: "#fff", color: C.inkSoft, cursor: "pointer" }}>返回</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setConfirmDelete(o.id)} style={{ marginLeft: "auto", padding: "6px 12px", borderRadius: 20, fontSize: 12, fontFamily: SANS, border: `1.5px solid ${C.danger}40`, background: "#fff", color: C.danger, cursor: "pointer" }}> 永久刪除</button>
+                        )}
+                      </div>
+                    )}
+                  </TagCard>
+                );
+              })}
+            </div>
+          ))
       }
     </div>
   );
 }
 
 /* ── Admin: Products ── */
-function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
+/* ══════════════════════════════════════════
+   ADMIN: STOCK REPAIR — 庫存校正工具（一次性使用）
+   用途：抓出「未取消但實際已被扣庫存」與「已取消但從未成功回補」的歷史訂單，
+   計算出每個商品／規格實際應補回的數量，供店家確認後一鍵套用修正。
+══════════════════════════════════════════ */
+function AdminStockRepair({ products, orders, onApplyRepair }) {
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  // 找出「已取消但 stockRestored 不是 true」的訂單：代表回補從未成功執行過，庫存被扣走但沒補回來
+  const brokenCancelled = orders.filter(o => o.status === "cancelled" && o.stockDeducted && Object.keys(o.stockDeducted).length > 0 && o.stockRestored !== true);
+
+  // 彙總每個商品/規格應補回的數量
+  const repairMap = {}; // productId -> { variantName/baseItem: qty }
+  brokenCancelled.forEach(o => {
+    Object.entries(o.stockDeducted).forEach(([pid, variants]) => {
+      if (!repairMap[pid]) repairMap[pid] = {};
+      Object.entries(variants).forEach(([vKey, qty]) => {
+        repairMap[pid][vKey] = (repairMap[pid][vKey] || 0) + (Number(qty) || 0);
+      });
+    });
+  });
+
+  const repairList = Object.entries(repairMap).map(([pid, variants]) => {
+    const p = products.find(x => String(x.id) === pid);
+    return { pid, product: p, variants };
+  }).filter(r => r.product);
+
+  const totalQty = repairList.reduce((acc, r) => acc + Object.values(r.variants).reduce((a, b) => a + b, 0), 0);
+
+  const handleApply = async () => {
+    setBusy(true);
+    try {
+      await onApplyRepair(repairList, brokenCancelled);
+      setDone(true);
+    } catch (e) {
+      alert("校正失敗，請稍後再試");
+    }
+    setBusy(false);
+  };
+
+  if (repairList.length === 0 && !done) return null; // 沒有需要校正的項目時完全不顯示，避免干擾日常操作
+
+  return (
+    <TagCard style={{ padding: 0, marginBottom: 16, overflow: "hidden", border: `1.5px solid ${C.warn}60` }}>
+      <button onClick={() => setExpanded(e => !e)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: C.warnLight, border: "none", cursor: "pointer" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 16 }}></span>
+          <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.warn }}>
+            {done ? "庫存校正已完成" : `偵測到 ${repairList.length} 項商品庫存可能有誤，建議校正`}
+          </span>
+        </div>
+        <span style={{ fontFamily: SANS, fontSize: 12, color: C.warn }}>{expanded ? "收合 ▲" : "展開 ▼"}</span>
+      </button>
+
+      {expanded && (
+        <div style={{ padding: 16 }}>
+          {done ? (
+            <p style={{ fontFamily: SANS, fontSize: 13, color: C.leaf, lineHeight: 1.7 }}> 已成功將庫存補回，相關訂單已標記為已處理，不會重複校正。</p>
+          ) : (
+            <>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft, lineHeight: 1.7, marginBottom: 14 }}>
+                以下商品因系統先前的小問題，取消訂單時庫存未被正確加回，請確認以下數量無誤後點擊校正。校正後同一批訂單不會被重複計算。
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                {repairList.map(r => (
+                  <div key={r.pid} style={{ padding: "10px 12px", borderRadius: 10, background: C.bg, border: `1px solid ${C.line}` }}>
+                    <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 4 }}>{r.product.name}</div>
+                    {Object.entries(r.variants).map(([vKey, qty]) => (
+                      <div key={vKey} style={{ display: "flex", justifyContent: "space-between", fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>
+                        <span>{vKey === "baseItem" ? "無規格商品" : `規格：${vKey}`}</span>
+                        <span style={{ fontWeight: 700, color: C.leaf }}>+{qty} 件</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, padding: "8px 12px", background: C.leafLight, borderRadius: 8 }}>
+                <span style={{ fontFamily: SANS, fontSize: 12, color: C.forest }}>合計將補回</span>
+                <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 900, color: C.forest }}>{totalQty} 件</span>
+              </div>
+              <Btn variant="ham" onClick={handleApply} full disabled={busy}>{busy ? "校正中…" : "確認，立即校正庫存"}</Btn>
+            </>
+          )}
+        </div>
+      )}
+    </TagCard>
+  );
+}
+
+
+function AdminProducts({ products, cats, orders, onUpdateProducts, onUpdateCats, onApplyStockRepair }) {
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [newCat, setNewCat] = useState("");
 
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const startEdit = p => { setDraft({ ...p }); setEditingId(p.id); };
-  const startNew  = () => { const p = { id: uid(), name: "", unit: "", price: 0, orig: 0, groupPrice: 0, em: "", img: "", cat: cats[1]?.id || "food", stock: 0 }; setDraft(p); setEditingId("new"); };
-  const save = () => {
-    if (editingId === "new") onUpdateProducts([...products, draft]);
-    else onUpdateProducts(products.map(p => p.id === editingId ? draft : p));
-    setEditingId(null); setDraft(null);
+  const startNew  = () => { const p = { id: uid(), name: "", unit: "", price: 0, orig: 0, groupPrice: 0, em: "", img: "", cat: cats[1]?.id || "food", stock: 0, active: true, variants: [] }; setDraft(p); setEditingId("new"); };
+  const save = async () => {
+    setSaveError("");
+    setSaving(true);
+    try {
+      const next = editingId === "new" ? [...products, draft] : products.map(p => p.id === editingId ? draft : p);
+      await onUpdateProducts(next);
+      setEditingId(null); setDraft(null);
+    } catch (err) {
+      const msg = err?.message || "未知錯誤";
+      if (/longer than|exceeds|too large|1048487|invalid-argument/i.test(msg)) {
+        setSaveError("商品圖片檔案過大，請重新上傳一張較小的圖片再儲存。");
+      } else {
+        setSaveError("儲存失敗，請檢查網路連線後再試一次（" + msg + "）");
+      }
+    } finally {
+      setSaving(false);
+    }
   };
   const del = id => onUpdateProducts(products.filter(p => p.id !== id));
 
@@ -1833,16 +3090,28 @@ function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
                   
                   <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>點擊上傳商品圖片</span>
                   <span style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted }}>支援 JPG、PNG、WEBP</span>
-                  <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+                  <input type="file" accept="image/*" style={{ display: "none" }} onChange={async e => {
                     const file = e.target.files[0];
                     if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = ev => setDraft(d => ({ ...d, img: ev.target.result }));
-                    reader.readAsDataURL(file);
+                    try {
+                      const compressed = await compressImage(file);
+                      setDraft(d => ({ ...d, img: compressed }));
+                    } catch (err) {
+                      alert("圖片處理失敗，請換一張圖片試試");
+                    }
                   }} />
                 </label>
             }
           </div>
+        </div>
+
+        {/* 上下架開關 */}
+        <div style={{ marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderRadius: 12, background: draft.active !== false ? C.leafLight : "#F7F7F7", border: `1.5px solid ${draft.active !== false ? C.leaf : C.line}` }}>
+          <div>
+            <div style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: draft.active !== false ? C.forest : C.inkMuted }}>{draft.active !== false ? "已上架" : "已下架"}</div>
+            <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 2 }}>下架後前台將不會顯示此商品</div>
+          </div>
+          <Toggle checked={draft.active !== false} onChange={v => setDraft(d => ({ ...d, active: v }))} label={draft.active !== false ? "上架中" : "已下架"} />
         </div>
 
         {[["商品名稱","name","text"],["計量單位","unit","text"],["售價（原價）","price","number"],["庫存數量","stock","number"]].map(([label, key, type]) => (
@@ -1861,6 +3130,48 @@ function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
             {cats.filter(c => c.id !== "all").map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
           </select>
         </div>
+
+        {/* 規格管理 */}
+        <div style={{ marginBottom: 20 }}>
+          <FieldLabel>商品規格 <span style={{ fontFamily: SANS, fontSize: 11, fontWeight: 400, color: C.inkMuted }}>（選填，例如不同重量/容量，各自獨立價格與庫存）</span></FieldLabel>
+          {(draft.variants || []).length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 10 }}>
+              {(draft.variants || []).map((v, i) => (
+                <div key={i} style={{ border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "12px", background: C.bg }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.ham }}>規格 {i + 1}</span>
+                    <button onClick={() => setDraft(d => ({ ...d, variants: d.variants.filter((_, j) => j !== i) }))} style={{ background: "none", border: "none", cursor: "pointer", color: C.danger, fontSize: 12, fontWeight: 700 }}>移除此規格</button>
+                  </div>
+
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>規格名稱</div>
+                    <input placeholder="例如：200g" value={v.name} onChange={e => setDraft(d => ({ ...d, variants: d.variants.map((x, j) => j === i ? { ...x, name: e.target.value } : x) }))} style={inputSt} />
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>售價</div>
+                      <input type="number" value={v.price || 0} onChange={e => setDraft(d => ({ ...d, variants: d.variants.map((x, j) => j === i ? { ...x, price: Number(e.target.value) } : x) }))} style={inputSt} />
+                    </div>
+                    <div>
+                      <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>團購價（選填）</div>
+                      <input type="number" value={v.groupPrice || 0} onChange={e => setDraft(d => ({ ...d, variants: d.variants.map((x, j) => j === i ? { ...x, groupPrice: Number(e.target.value) } : x) }))} style={{ ...inputSt, border: `1.5px solid ${v.groupPrice > 0 ? C.ham : C.line}`, background: v.groupPrice > 0 ? C.hamLight : "#fff" }} />
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginBottom: 4 }}>庫存數量</div>
+                    <input type="number" value={v.stock || 0} onChange={e => setDraft(d => ({ ...d, variants: d.variants.map((x, j) => j === i ? { ...x, stock: Number(e.target.value) } : x) }))} style={inputSt} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <Btn small variant="subtle" onClick={() => setDraft(d => ({ ...d, variants: [...(d.variants || []), { name: "", price: d.price || 0, groupPrice: 0, stock: 0 }] }))}>＋ 新增規格</Btn>
+          {(draft.variants || []).length > 0 && (
+            <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 8, lineHeight: 1.6 }}>有設定規格時，前台將以規格的價格與庫存為準，上方「售價」「庫存」欄位將不顯示給客人。</p>
+          )}
+        </div>
         <div style={{ marginBottom: 20 }}>
           <FieldLabel>商品詳細說明</FieldLabel>
           <textarea
@@ -1871,9 +3182,14 @@ function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
             style={{ ...inputSt, resize: "vertical", lineHeight: 1.7 }}
           />
         </div>
+        {saveError && (
+          <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 10, background: C.dangerLight, border: `1.5px solid ${C.danger}40` }}>
+            <p style={{ fontFamily: SANS, fontSize: 12, color: C.danger, lineHeight: 1.6, margin: 0 }}>{saveError}</p>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 10 }}>
-          <Btn variant="ham" onClick={save} full>儲存商品</Btn>
-          <Btn variant="subtle" onClick={() => { setEditingId(null); setDraft(null); }}>取消</Btn>
+          <Btn variant="ham" onClick={save} full disabled={saving}>{saving ? "儲存中…" : "儲存商品"}</Btn>
+          <Btn variant="subtle" onClick={() => { setEditingId(null); setDraft(null); }} disabled={saving}>取消</Btn>
         </div>
       </TagCard>
     </div>
@@ -1952,33 +3268,140 @@ function AdminProducts({ products, cats, onUpdateProducts, onUpdateCats }) {
         </div>
       </TagCard>
 
+      <AdminStockRepair products={products} orders={orders} onApplyRepair={onApplyStockRepair} />
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>商品列表（{products.length} 項）</div>
         <Btn small variant="ham" onClick={startNew}>+ 新增商品</Btn>
       </div>
 
-      {products.map(p => (
-        <TagCard key={p.id} style={{ padding: "12px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 48, height: 48, borderRadius: 10, overflow: "hidden", background: C.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {(() => {
+        // 完全缺貨：無規格商品庫存為 0，或有規格商品「全部」規格庫存為 0
+        const fullyOutCount = products.filter(p => {
+          const hasV = (p.variants || []).length > 0;
+          if (hasV) return p.variants.every(v => (Number(v.stock) || 0) <= 0);
+          return Number(p.stock || 0) <= 0;
+        }).length;
+        // 部分缺貨：有規格商品中，只有部分規格庫存為 0（其他規格還有貨）
+        const partialOutCount = products.filter(p => {
+          const hasV = (p.variants || []).length > 0;
+          if (!hasV) return false;
+          const zeroCount = p.variants.filter(v => (Number(v.stock) || 0) <= 0).length;
+          return zeroCount > 0 && zeroCount < p.variants.length;
+        }).length;
+        if (fullyOutCount === 0 && partialOutCount === 0) return null;
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+            {fullyOutCount > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 10, background: C.dangerLight, border: `1.5px solid ${C.danger}40` }}>
+                <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.danger }}> 有 {fullyOutCount} 項商品已完全缺貨，請留意補貨</span>
+              </div>
+            )}
+            {partialOutCount > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 10, background: C.warnLight, border: `1.5px solid ${C.warn}40` }}>
+                <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.warn }}> 有 {partialOutCount} 項商品的部分規格已缺貨，請留意補貨</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {products.map(p => {
+        const hasVariants = (p.variants || []).length > 0;
+        const isActive = p.active !== false;
+        const totalStock = hasVariants ? p.variants.reduce((a, v) => a + (Number(v.stock) || 0), 0) : Number(p.stock || 0);
+        const outVariants = hasVariants ? p.variants.filter(v => (Number(v.stock) || 0) <= 0) : [];
+        const isFullyOut = hasVariants ? outVariants.length === p.variants.length : totalStock <= 0;
+        const isPartiallyOut = hasVariants && outVariants.length > 0 && !isFullyOut;
+        const needsAttention = isFullyOut || isPartiallyOut;
+        return (
+        <TagCard key={p.id} style={{
+          padding: "12px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12,
+          opacity: isActive ? 1 : 0.55,
+          border: isFullyOut ? `1.5px solid ${C.danger}50` : isPartiallyOut ? `1.5px solid ${C.warn}50` : undefined,
+          background: isFullyOut ? C.dangerLight : isPartiallyOut ? C.warnLight : undefined,
+        }}>
+          <div style={{ width: 48, height: 48, borderRadius: 10, overflow: "hidden", background: C.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
             {p.img
               ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               : <span style={{ fontSize: 26 }}>{p.em}</span>}
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}</div>
-            <div style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>{p.unit} · {money(p.price)} · 庫存 {p.stock}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: C.ink }}>{p.name}</div>
+              {!isActive && <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: "#fff", background: C.inkMuted, borderRadius: 6, padding: "1px 6px" }}>已下架</span>}
+              {isFullyOut && <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: "#fff", background: C.danger, borderRadius: 6, padding: "1px 6px" }}> 缺貨</span>}
+              {isPartiallyOut && <span style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, color: "#fff", background: C.warn, borderRadius: 6, padding: "1px 6px" }}> 部分規格缺貨</span>}
+            </div>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: needsAttention ? (isFullyOut ? C.danger : C.warn) : C.inkSoft, fontWeight: needsAttention ? 700 : 400 }}>
+              {hasVariants
+                ? `${p.variants.length} 種規格 · 庫存共 ${totalStock}`
+                : `${p.unit} · ${money(p.price)} · 庫存 ${totalStock}`}
+            </div>
+            {isPartiallyOut && (
+              <div style={{ fontFamily: SANS, fontSize: 11, color: C.warn, marginTop: 3 }}>
+                缺貨規格：{outVariants.map(v => v.name).join("、")}
+              </div>
+            )}
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <Btn small variant="subtle" onClick={() => startEdit(p)}>編輯</Btn>
-            <Btn small variant="danger" onClick={() => del(p.id)}>刪除</Btn>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <Toggle checked={isActive} onChange={v => onUpdateProducts(products.map(x => x.id === p.id ? { ...x, active: v } : x))} />
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn small variant="subtle" onClick={() => startEdit(p)}>編輯</Btn>
+              <Btn small variant="danger" onClick={() => del(p.id)}>刪除</Btn>
+            </div>
           </div>
         </TagCard>
-      ))}
+      );})}
     </div>
   );
 }
 
 /* ── Admin: Settings ── (分類完整可修改) */
+/* ── AdminSettings 共用子元件（搬到外層避免每次輸入時重新建立元件造成失焦） ── */
+function AdminSection({ title, emoji, children }) {
+  return (
+    <TagCard style={{ padding: 20, marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, paddingBottom: 12, borderBottom: `1.5px solid ${C.line}` }}>
+        <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>{title}</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {children}
+      </div>
+    </TagCard>
+  );
+}
+
+function AdminField({ label, hint, children }) {
+  return (
+    <div>
+      <FieldLabel>{label}</FieldLabel>
+      {children}
+      {hint && <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 5, lineHeight: 1.5 }}>{hint}</p>}
+    </div>
+  );
+}
+
+function AdminOptionEditor({ label, options, onChange, inputSt }) {
+  const [newVal, setNewVal] = useState("");
+  return (
+    <AdminField label={label}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+        {options.map((opt, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, background: C.leafLight, border: `1.5px solid ${C.leaf}20`, borderRadius: 20, padding: "5px 12px" }}>
+            <span style={{ fontFamily: SANS, fontSize: 12, color: C.forest }}>{opt}</span>
+            <button onClick={() => onChange(options.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: C.danger, fontSize: 14, lineHeight: 1 }}>×</button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder="新增選項" style={{ ...inputSt, flex: 1 }} />
+        <Btn small variant="subtle" onClick={() => { if (newVal.trim()) { onChange([...options, newVal.trim()]); setNewVal(""); } }}>新增</Btn>
+      </div>
+    </AdminField>
+  );
+}
+
 function AdminSettings({ settings, onSave }) {
   const [d, setD] = useState({ ...settings });
   const [saved, setSaved] = useState(false);
@@ -1989,46 +3412,9 @@ function AdminSettings({ settings, onSave }) {
 
   const inputSt = { width: "100%", padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontFamily: SANS, fontSize: 13, outline: "none" };
   const textSt  = { ...inputSt, resize: "vertical" };
-
-  const Section = ({ title, emoji, children }) => (
-    <TagCard style={{ padding: 20, marginBottom: 16 }}>
-      <div style={{ marginBottom: 16, paddingBottom: 12, borderBottom: `1.5px solid ${C.line}` }}>
-        <span style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 900, color: C.ink }}>{title}</span>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {children}
-      </div>
-    </TagCard>
-  );
-
-  const F = ({ label, hint, children }) => (
-    <div>
-      <FieldLabel>{label}</FieldLabel>
-      {children}
-      {hint && <p style={{ fontFamily: SANS, fontSize: 11, color: C.inkMuted, marginTop: 5, lineHeight: 1.5 }}>{hint}</p>}
-    </div>
-  );
-
-  /* Pickup/Pay option editor */
-  const OptionEditor = ({ label, options, onChange }) => {
-    const [newVal, setNewVal] = useState("");
-    return (
-      <F label={label}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
-          {options.map((opt, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, background: C.leafLight, border: `1.5px solid ${C.leaf}20`, borderRadius: 20, padding: "5px 12px" }}>
-              <span style={{ fontFamily: SANS, fontSize: 12, color: C.forest }}>{opt}</span>
-              <button onClick={() => onChange(options.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: C.danger, fontSize: 14, lineHeight: 1 }}>×</button>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder="新增選項" style={{ ...inputSt, flex: 1 }} />
-          <Btn small variant="subtle" onClick={() => { if (newVal.trim()) { onChange([...options, newVal.trim()]); setNewVal(""); } }}>新增</Btn>
-        </div>
-      </F>
-    );
-  };
+  const Section = AdminSection;
+  const F = AdminField;
+  const OptionEditor = (props) => <AdminOptionEditor {...props} inputSt={inputSt} />;
 
   return (
     <div>
@@ -2081,11 +3467,14 @@ function AdminSettings({ settings, onSave }) {
               }}>
                 
                 <span style={{ fontFamily: SANS, fontSize: 12, color: C.inkSoft }}>點擊上傳背景圖片</span>
-                <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+                <input type="file" accept="image/*" style={{ display: "none" }} onChange={async e => {
                   const file = e.target.files[0]; if (!file) return;
-                  const reader = new FileReader();
-                  reader.onload = ev => setD(s => ({ ...s, heroImg: ev.target.result }));
-                  reader.readAsDataURL(file);
+                  try {
+                    const compressed = await compressImage(file, 1200, 0.75);
+                    setD(s => ({ ...s, heroImg: compressed }));
+                  } catch (err) {
+                    alert("圖片處理失敗，請換一張圖片試試");
+                  }
                 }} />
               </label>
           }
@@ -2097,6 +3486,33 @@ function AdminSettings({ settings, onSave }) {
         <F label="須知內容" hint="客人進入網站時會先閱讀此內容，勾選同意後才能下單">
           <textarea style={textSt} rows={10} value={d.notice} onChange={set("notice")} />
         </F>
+      </Section>
+
+      {/* 會員集點規則 */}
+      <Section title="會員集點規則" emoji="">
+        <F label="開放集點功能">
+          <Toggle checked={d.pointsEnabled} onChange={setB("pointsEnabled")} label={d.pointsEnabled ? "已開放" : "尚未開放"} />
+        </F>
+        {d.pointsEnabled ? (
+          <>
+            <F label="集點規則" hint="設定消費滿多少金額可獲得幾點，會員頁將自動顯示此規則">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>每消費滿</span>
+                <input type="number" style={{ ...inputSt, width: 90 }} value={d.pointsPerAmount} onChange={e => setD(s => ({ ...s, pointsPerAmount: Number(e.target.value) }))} />
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>元，可獲得</span>
+                <input type="number" style={{ ...inputSt, width: 70 }} value={d.pointsPerAmountGet} onChange={e => setD(s => ({ ...s, pointsPerAmountGet: Number(e.target.value) }))} />
+                <span style={{ fontFamily: SANS, fontSize: 13, color: C.inkSoft }}>點</span>
+              </div>
+            </F>
+            <div style={{ padding: "10px 14px", borderRadius: 10, background: "#FFF6E8", border: `1.5px solid #F0D9A8` }}>
+              <p style={{ fontFamily: SANS, fontSize: 12, color: "#8A6A20", lineHeight: 1.7, margin: 0 }}>
+                 範例：消費 {money(d.pointsPerAmount || 0)} 可得 {d.pointsPerAmountGet || 0} 點。實際點數須在「會員管理」分頁手動為會員加點。
+              </p>
+            </div>
+          </>
+        ) : (
+          <p style={{ fontFamily: SANS, fontSize: 12, color: C.inkMuted, lineHeight: 1.7 }}>集點功能尚未開放時，前台會員頁僅顯示「集點功能尚未開放」提示，不會累積點數。</p>
+        )}
       </Section>
 
       {/* 下單選項 */}
@@ -2194,11 +3610,78 @@ function App() {
   const [screen,   setScreen]   = useState("home");
   const [cart,     setCart]     = useState({});
   const [myOrders, setMyOrders] = useState([]);
+  const [allOrders, setAllOrders] = useState([]); // 後台專用：所有人的訂單
+  const [allMembers, setAllMembers] = useState([]); // 後台專用：所有會員資料
   const [lastOrder,   setLastOrder]   = useState(null);
   const [policyPage,  setPolicyPage]  = useState(null);
   const [adminMode, setAdminMode] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(false);
   const [dbReady, setDbReady] = useState(false);
+  const [member, setMember] = useState(null);       // { phone, name, lineId } | null
+  const [showMemberAuth, setShowMemberAuth] = useState(false);
+  const [selectedOrder, setSelectedOrder] = useState(null);
+  const [inProductDetail, setInProductDetail] = useState(false);
+
+  // 還原已登入會員（用 localStorage 記住登入狀態，避免每次重整都要重新登入）
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("hamster_member");
+      if (saved) setMember(JSON.parse(saved));
+    } catch (e) {}
+  }, []);
+  const loginMember = m => {
+    setMember(m);
+    setShowMemberAuth(false);
+    try { localStorage.setItem("hamster_member", JSON.stringify(m)); } catch (e) {}
+  };
+  const logoutMember = () => {
+    setMember(null);
+    try { localStorage.removeItem("hamster_member"); } catch (e) {}
+  };
+  // 會員自行編輯資料：更新 Firestore 的 members 文件，並同步本機 member state 與 localStorage
+  const updateMemberProfile = async (patch) => {
+    if (!member?.phone || !db.current) throw new Error("尚未登入或資料庫尚未連線");
+    const { firestore, doc, setDoc, getDoc } = db.current;
+    const snap = await getDoc(doc(firestore, "members", member.phone));
+    const existing = snap.exists() ? snap.data() : {};
+    const updated = { ...existing, name: patch.name.trim(), lineId: (patch.lineId || "").trim(), birthday: patch.birthday || "" };
+    await setDoc(doc(firestore, "members", member.phone), updated);
+    const nextMember = { ...member, name: updated.name, lineId: updated.lineId, birthday: updated.birthday };
+    setMember(nextMember);
+    try { localStorage.setItem("hamster_member", JSON.stringify(nextMember)); } catch (e) {}
+  };
+  // 會員自行修改密碼：需驗證目前密碼正確（可能是店家代為重設的新密碼）才能更新
+  const changeOwnPassword = async (oldPassword, newPassword) => {
+    if (!member?.phone || !db.current) throw new Error("尚未登入或資料庫尚未連線");
+    const { firestore, doc, setDoc, getDoc } = db.current;
+    const snap = await getDoc(doc(firestore, "members", member.phone));
+    if (!snap.exists()) throw new Error("找不到會員資料");
+    const existing = snap.data();
+    const oldHashed = await hashPassword(oldPassword);
+    if (existing.passwordHash !== oldHashed) throw new Error("目前密碼輸入錯誤，請確認後再試");
+    const newHashed = await hashPassword(newPassword);
+    await setDoc(doc(firestore, "members", member.phone), { ...existing, passwordHash: newHashed });
+  };
+  // 後台手動調整會員點數：delta 為增減量；absolute=true 時 delta 視為直接設定的點數
+  const updateMemberPoints = async (phone, delta, absolute) => {
+    if (!db.current) throw new Error("資料庫尚未連線");
+    const { firestore, doc, setDoc, getDoc } = db.current;
+    const snap = await getDoc(doc(firestore, "members", phone));
+    const existing = snap.exists() ? snap.data() : {};
+    const current = Number(existing.points || 0);
+    const next = absolute ? Number(delta) : Math.max(0, current + delta);
+    await setDoc(doc(firestore, "members", phone), { ...existing, points: next });
+  };
+  // 後台代會員重設密碼（忘記密碼時使用）
+  const resetMemberPassword = async (phone, newPassword) => {
+    if (!db.current) throw new Error("資料庫尚未連線");
+    const { firestore, doc, setDoc, getDoc } = db.current;
+    const snap = await getDoc(doc(firestore, "members", phone));
+    if (!snap.exists()) throw new Error("找不到此會員");
+    const existing = snap.data();
+    const hashed = await hashPassword(newPassword);
+    await setDoc(doc(firestore, "members", phone), { ...existing, passwordHash: hashed });
+  };
 
   // ── Firebase 初始化 ──
   const db = React.useRef(null);
@@ -2232,16 +3715,60 @@ function App() {
       if (snap.exists() && snap.data().list) setCats(snap.data().list);
     });
 
-    // 讀取訂單（即時同步）
-    const unsubOrders = onSnapshot(collection(firestore, "orders"), snap => {
-      const list = snap.docs.map(d => ({ ...d.data(), _fireId: d.id }));
+    setDbReady(true);
+    return () => { unsubProducts(); };
+  }, []);
+
+  // 訂單監聽：只抓「自己」的訂單（依登入會員的手機號碼篩選），未登入時清空列表
+  useEffect(() => {
+    if (!db.current || !member?.phone) { setMyOrders([]); return; }
+    const { firestore, collection, onSnapshot } = db.current;
+    const unsub = onSnapshot(collection(firestore, "orders"), snap => {
+      const list = snap.docs
+        .map(d => ({ ...d.data(), _fireId: d.id }))
+        .filter(o => o.memberPhone === member.phone);
       list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       setMyOrders(list);
     });
+    return () => unsub();
+  }, [member?.phone, dbReady]);
 
-    setDbReady(true);
-    return () => { unsubProducts(); unsubOrders(); };
-  }, []);
+  // 自己會員資料監聽：即時同步點數等後台可能變動的欄位（不影響登入用的 phone/name 編輯流程）
+  useEffect(() => {
+    if (!db.current || !member?.phone) return;
+    const { firestore, doc, onSnapshot } = db.current;
+    const unsub = onSnapshot(doc(firestore, "members", member.phone), snap => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setMember(m => m ? { ...m, points: data.points || 0 } : m);
+      }
+    });
+    return () => unsub();
+  }, [member?.phone, dbReady]);
+
+  // 後台訂單監聽：店家登入後台後才訂閱全部訂單
+  useEffect(() => {
+    if (!db.current || !adminAuthed) { setAllOrders([]); return; }
+    const { firestore, collection, onSnapshot } = db.current;
+    const unsub = onSnapshot(collection(firestore, "orders"), snap => {
+      const list = snap.docs.map(d => ({ ...d.data(), _fireId: d.id }));
+      list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setAllOrders(list);
+    });
+    return () => unsub();
+  }, [adminAuthed, dbReady]);
+
+  // 後台會員監聽：店家登入後台後才訂閱全部會員資料
+  useEffect(() => {
+    if (!db.current || !adminAuthed) { setAllMembers([]); return; }
+    const { firestore, collection, onSnapshot } = db.current;
+    const unsub = onSnapshot(collection(firestore, "members"), snap => {
+      const list = snap.docs.map(d => ({ ...d.data(), _fireId: d.id }));
+      list.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+      setAllMembers(list);
+    });
+    return () => unsub();
+  }, [adminAuthed, dbReady]);
 
   const cartCount = Object.values(cart).reduce((a,b) => a+b, 0);
   const addToCart = id => setCart(c => ({ ...c, [id]: (c[id]||0)+1 }));
@@ -2251,13 +3778,129 @@ function App() {
     return { ...c, [id]: n };
   });
 
+  // 商品清單更新後（如店家刪除商品），自動清掉購物車中指向已不存在商品的項目，
+  // 避免購物車數量小紅點與實際可見商品數量對不上
+  useEffect(() => {
+    if (!products.length) return; // 商品尚未載入完成時不清理，避免誤刪
+    setCart(c => {
+      let changed = false;
+      const next = {};
+      for (const key of Object.keys(c)) {
+        const pid = String(key).split("::")[0];
+        if (products.find(p => String(p.id) === pid)) {
+          next[key] = c[key];
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : c;
+    });
+  }, [products]);
+
+  // ── 規格商品的購物車 key 格式："productId::variantName"；無規格商品 key 為 "productId" ──
+  const cartKeyOf = (product, variant) => variant ? `${product.id}::${variant.name}` : String(product.id);
+  const addVariantToCart = (product, variant) => {
+    const key = cartKeyOf(product, variant);
+    setCart(c => ({ ...c, [key]: (c[key]||0)+1 }));
+  };
+  const changeQtyVariant = (product, variant, d) => {
+    const key = cartKeyOf(product, variant);
+    setCart(c => {
+      const n = Math.max(0, (c[key]||0)+d);
+      if (!n) { const copy = {...c}; delete copy[key]; return copy; }
+      return { ...c, [key]: n };
+    });
+  };
+  // 解析 cart key → { product, variant }
+  const resolveCartKey = key => {
+    const [pid, vname] = String(key).split("::");
+    const p = products.find(x => String(x.id) === pid);
+    if (!p) return null;
+    const v = vname ? (p.variants || []).find(v => v.name === vname) : null;
+    return { product: p, variant: v };
+  };
+  // 取得 cart key 對應的有效單價
+  const effectivePriceOf = key => {
+    const r = resolveCartKey(key);
+    if (!r) return 0;
+    const { product: p, variant: v } = r;
+    if (v) return v.groupPrice > 0 ? v.groupPrice : v.price;
+    return p.groupPrice > 0 ? p.groupPrice : p.price;
+  };
+
   const placeOrder = async form => {
     const { firestore, collection, addDoc, serverTimestamp } = db.current;
+    const { runTransaction, doc } = window.FirebaseFirestore;
     const keys = Object.keys(cart).filter(k => cart[k]>0);
-    const total = keys.reduce((acc, id) => { const p = products.find(x=>x.id==id); const ep = p.groupPrice > 0 ? p.groupPrice : p.price; return acc + ep * cart[id]; }, 0);
-    const items = keys.map(id => { const p = products.find(x=>x.id==id); return `${p.name} x${cart[id]}`; }).join("、");
+    const total = keys.reduce((acc, key) => acc + effectivePriceOf(key) * cart[key], 0);
+    const items = keys.map(key => {
+      const r = resolveCartKey(key);
+      if (!r) return "";
+      const label = r.variant ? `${r.product.name}（${r.variant.name}）` : r.product.name;
+      return `${label} x${cart[key]}`;
+    }).join("、");
+
+    // 整理每個商品需要扣的數量（同一商品不同規格分開扣，無規格商品合併扣總數）
+    const need = {}; // productId -> { variantName: qty } ；無規格時 variantName 用 "baseItem"
+    keys.forEach(key => {
+      const r = resolveCartKey(key);
+      if (!r) return;
+      const pid = String(r.product.id);
+      const vKey = r.variant ? r.variant.name : "baseItem";
+      if (!need[pid]) need[pid] = {};
+      need[pid][vKey] = (need[pid][vKey] || 0) + cart[key];
+    });
+
+    // 用 transaction 扣庫存，確保多人同時下單不會超賣
+    try {
+      await runTransaction(firestore, async (tx) => {
+        const productDocs = {};
+        for (const pid of Object.keys(need)) {
+          const pRef = doc(firestore, "products", pid);
+          const pSnap = await tx.get(pRef);
+          if (!pSnap.exists()) throw new Error("商品已不存在，請重新整理頁面後再試");
+          productDocs[pid] = { ref: pRef, data: pSnap.data() };
+        }
+        // 檢查庫存是否足夠（強制轉成數字比較，避免 Firestore 中庫存欄位型別不一致導致比較失效）
+        for (const pid of Object.keys(need)) {
+          const data = productDocs[pid].data;
+          const hasVariants = (data.variants || []).length > 0;
+          for (const vKey of Object.keys(need[pid])) {
+            const qty = Number(need[pid][vKey]) || 0;
+            if (hasVariants) {
+              const v = (data.variants || []).find(x => x.name === vKey);
+              const vStock = Number(v?.stock) || 0;
+              if (!v || vStock < qty) throw new Error(`「${data.name}（${vKey}）」目前庫存只剩 ${vStock} 件，請調整購買數量`);
+            } else {
+              const pStock = Number(data.stock) || 0;
+              if (pStock < qty) throw new Error(`「${data.name}」目前庫存只剩 ${pStock} 件，請調整購買數量`);
+            }
+          }
+        }
+        // 通過檢查後執行扣庫存
+        for (const pid of Object.keys(need)) {
+          const { ref, data } = productDocs[pid];
+          const hasVariants = (data.variants || []).length > 0;
+          if (hasVariants) {
+            const newVariants = data.variants.map(v => {
+              const qty = Number(need[pid][v.name]) || 0;
+              return qty ? { ...v, stock: Math.max(0, (Number(v.stock) || 0) - qty) } : v;
+            });
+            tx.update(ref, { variants: newVariants });
+          } else {
+            const qty = Number(need[pid]["baseItem"]) || 0;
+            tx.update(ref, { stock: Math.max(0, (Number(data.stock) || 0) - qty) });
+          }
+        }
+      });
+    } catch (err) {
+      throw err; // 交由 CheckoutScreen 顯示錯誤訊息，不繼續建立訂單
+    }
+
     const oid = "#" + Date.now().toString(36).toUpperCase();
-    const order = { id: oid, ...form, items, total: `NT$${total}`, status: "pending", date: new Date().toLocaleString("zh-TW"), createdAt: serverTimestamp() };
+    // memberPhone 用登入帳號的電話做篩選依據，避免客人結帳時填的電話打錯字導致自己查不到訂單
+    // stockDeducted 記錄這筆訂單實際扣了哪些商品/規格各多少數量，供日後取消訂單時精確回補庫存
+    const order = { id: oid, ...form, memberPhone: member?.phone || form.phone, items, total: `NT$${total}`, status: "pending", date: new Date().toLocaleString("zh-TW"), createdAt: serverTimestamp(), stockDeducted: need };
     await addDoc(collection(firestore, "orders"), order);
     setLastOrder(order);
     setCart({});
@@ -2265,14 +3908,183 @@ function App() {
   };
 
   const updateOrderStatus = async (orderId, status) => {
-    const { firestore, collection, updateDoc, doc } = db.current;
-    const o = myOrders.find(x => x.id === orderId);
-    if (o?._fireId) await updateDoc(doc(firestore, "orders", o._fireId), { status });
+    const { firestore, doc, updateDoc, getDoc, setDoc, collection } = db.current;
+    const { runTransaction } = window.FirebaseFirestore;
+    const o = allOrders.find(x => x.id === orderId);
+    if (!o?._fireId) return;
+    const wasCancelled = o.status === "cancelled";
+    await updateDoc(doc(firestore, "orders", o._fireId), { status });
+
+    // 取消訂單時自動回補庫存：依下單時記錄的 stockDeducted 精確加回對應商品/規格的庫存
+    // stockRestored 標記避免同一筆訂單被重複取消（例如取消後恢復又再次取消）時重複回補
+    if (status === "cancelled" && !o.stockRestored && o.stockDeducted && Object.keys(o.stockDeducted).length > 0) {
+      try {
+        await runTransaction(firestore, async (tx) => {
+          const need = o.stockDeducted;
+          const productDocs = {};
+          for (const pid of Object.keys(need)) {
+            const pRef = doc(firestore, "products", pid);
+            const pSnap = await tx.get(pRef);
+            if (pSnap.exists()) productDocs[pid] = { ref: pRef, data: pSnap.data() };
+          }
+          for (const pid of Object.keys(need)) {
+            const entry = productDocs[pid];
+            if (!entry) continue; // 商品已被刪除，無法回補，略過
+            const { ref, data } = entry;
+            const hasVariants = (data.variants || []).length > 0;
+            if (hasVariants) {
+              const newVariants = data.variants.map(v => {
+                const qty = Number(need[pid][v.name]) || 0;
+                return qty ? { ...v, stock: (Number(v.stock) || 0) + qty } : v;
+              });
+              tx.update(ref, { variants: newVariants });
+            } else {
+              const qty = Number(need[pid]["baseItem"]) || 0;
+              if (qty) tx.update(ref, { stock: (Number(data.stock) || 0) + qty });
+            }
+          }
+        });
+        await updateDoc(doc(firestore, "orders", o._fireId), { stockRestored: true });
+      } catch (err) {
+        // 回補失敗不影響訂單取消本身，僅記錄錯誤避免整個取消動作失敗
+        console.error("回補庫存失敗：", err);
+      }
+    }
+
+    // 從「已取消」恢復為其他狀態時，剛才回補的庫存要重新扣回去（取消恢復標記，下次再取消才會再次回補）
+    if (wasCancelled && status !== "cancelled" && o.stockRestored && o.stockDeducted && Object.keys(o.stockDeducted).length > 0) {
+      try {
+        await runTransaction(firestore, async (tx) => {
+          const need = o.stockDeducted;
+          const productDocs = {};
+          for (const pid of Object.keys(need)) {
+            const pRef = doc(firestore, "products", pid);
+            const pSnap = await tx.get(pRef);
+            if (pSnap.exists()) productDocs[pid] = { ref: pRef, data: pSnap.data() };
+          }
+          for (const pid of Object.keys(need)) {
+            const entry = productDocs[pid];
+            if (!entry) continue;
+            const { ref, data } = entry;
+            const hasVariants = (data.variants || []).length > 0;
+            if (hasVariants) {
+              const newVariants = data.variants.map(v => {
+                const qty = Number(need[pid][v.name]) || 0;
+                return qty ? { ...v, stock: Math.max(0, (Number(v.stock) || 0) - qty) } : v;
+              });
+              tx.update(ref, { variants: newVariants });
+            } else {
+              const qty = Number(need[pid]["baseItem"]) || 0;
+              if (qty) tx.update(ref, { stock: Math.max(0, (Number(data.stock) || 0) - qty) });
+            }
+          }
+        });
+        await updateDoc(doc(firestore, "orders", o._fireId), { stockRestored: false });
+      } catch (err) {
+        console.error("恢復訂單重新扣庫存失敗：", err);
+      }
+    }
+
+    // 自動集點：訂單第一次變成「已付款」時，依消費金額換算點數加進會員帳戶
+    // pointsAwarded 標記避免同一筆訂單被退回又重新確認付款時重複加點
+    if (status === "paid" && settings.pointsEnabled && !o.pointsAwarded && o.memberPhone) {
+      const amount = Number(String(o.total).replace(/[^\d]/g, "")) || 0;
+      const perAmount = Number(settings.pointsPerAmount) || 0;
+      const perGet = Number(settings.pointsPerAmountGet) || 0;
+      if (perAmount > 0 && amount > 0) {
+        const earned = Math.floor(amount / perAmount) * perGet;
+        if (earned > 0) {
+          const mSnap = await getDoc(doc(firestore, "members", o.memberPhone));
+          const mData = mSnap.exists() ? mSnap.data() : {};
+          const newPoints = Number(mData.points || 0) + earned;
+          await setDoc(doc(firestore, "members", o.memberPhone), { ...mData, points: newPoints });
+          await updateDoc(doc(firestore, "orders", o._fireId), { pointsAwarded: earned });
+        }
+      }
+    }
   };
   const updateOrderNote = async (orderId, adminNote) => {
     const { firestore, updateDoc, doc } = db.current;
-    const o = myOrders.find(x => x.id === orderId);
+    const o = allOrders.find(x => x.id === orderId);
     if (o?._fireId) await updateDoc(doc(firestore, "orders", o._fireId), { adminNote });
+  };
+  // 永久刪除訂單：若訂單尚未取消（庫存還沒回補），刪除前先自動回補庫存，避免刪除後庫存帳目對不上
+  const deleteOrder = async (orderId) => {
+    const { firestore, doc } = db.current;
+    const { deleteDoc, runTransaction } = window.FirebaseFirestore;
+    const o = allOrders.find(x => x.id === orderId);
+    if (!o?._fireId) return;
+
+    const needsRestore = o.status !== "cancelled" && !o.stockRestored && o.stockDeducted && Object.keys(o.stockDeducted).length > 0;
+    if (needsRestore) {
+      try {
+        await runTransaction(firestore, async (tx) => {
+          const need = o.stockDeducted;
+          const productDocs = {};
+          for (const pid of Object.keys(need)) {
+            const pRef = doc(firestore, "products", pid);
+            const pSnap = await tx.get(pRef);
+            if (pSnap.exists()) productDocs[pid] = { ref: pRef, data: pSnap.data() };
+          }
+          for (const pid of Object.keys(need)) {
+            const entry = productDocs[pid];
+            if (!entry) continue;
+            const { ref, data } = entry;
+            const hasVariants = (data.variants || []).length > 0;
+            if (hasVariants) {
+              const newVariants = data.variants.map(v => {
+                const qty = Number(need[pid][v.name]) || 0;
+                return qty ? { ...v, stock: (Number(v.stock) || 0) + qty } : v;
+              });
+              tx.update(ref, { variants: newVariants });
+            } else {
+              const qty = Number(need[pid]["baseItem"]) || 0;
+              if (qty) tx.update(ref, { stock: (Number(data.stock) || 0) + qty });
+            }
+          }
+        });
+      } catch (err) {
+        console.error("刪除訂單前回補庫存失敗：", err);
+      }
+    }
+
+    await deleteDoc(doc(firestore, "orders", o._fireId));
+  };
+
+  // 一次性庫存校正：把因先前系統小問題而未成功回補的庫存補回去，並標記相關訂單避免重複校正
+  const applyStockRepair = async (repairList, brokenOrders) => {
+    const { firestore, doc, updateDoc } = db.current;
+    const { runTransaction } = window.FirebaseFirestore;
+
+    await runTransaction(firestore, async (tx) => {
+      const productDocs = {};
+      for (const r of repairList) {
+        const pRef = doc(firestore, "products", r.pid);
+        const pSnap = await tx.get(pRef);
+        if (pSnap.exists()) productDocs[r.pid] = { ref: pRef, data: pSnap.data() };
+      }
+      for (const r of repairList) {
+        const entry = productDocs[r.pid];
+        if (!entry) continue;
+        const { ref, data } = entry;
+        const hasVariants = (data.variants || []).length > 0;
+        if (hasVariants) {
+          const newVariants = data.variants.map(v => {
+            const qty = Number(r.variants[v.name]) || 0;
+            return qty ? { ...v, stock: (Number(v.stock) || 0) + qty } : v;
+          });
+          tx.update(ref, { variants: newVariants });
+        } else {
+          const qty = Number(r.variants["baseItem"]) || 0;
+          if (qty) tx.update(ref, { stock: (Number(data.stock) || 0) + qty });
+        }
+      }
+    });
+
+    // 標記這批訂單已處理，避免下次又被偵測為待校正
+    for (const o of brokenOrders) {
+      if (o._fireId) await updateDoc(doc(firestore, "orders", o._fireId), { stockRestored: true });
+    }
   };
 
   // 儲存設定到 Firebase
@@ -2284,18 +4096,19 @@ function App() {
 
   // 儲存商品到 Firebase
   const saveProducts = async (newProducts) => {
-    const { firestore, collection, doc, setDoc, addDoc } = db.current;
-    setProducts(newProducts);
-    // 同步所有商品：用 productId 作為 doc id
+    const { firestore, collection, doc, setDoc } = db.current;
+    if (!firestore) throw new Error("資料庫尚未連線完成，請稍候再試");
+    // 不在這裡呼叫 setProducts，避免與 Firestore onSnapshot 的即時回傳互相覆蓋造成新商品消失
+    // 同步所有商品：用 productId 作為 doc id（清除 undefined 欄位，Firestore 不接受 undefined）
     for (const p of newProducts) {
-      await setDoc(doc(firestore, "products", String(p.id)), p);
+      const clean = JSON.parse(JSON.stringify(p));
+      await setDoc(doc(firestore, "products", String(p.id)), clean);
     }
     // 刪除已不存在的商品
-    const { getDocs } = window.FirebaseFirestore;
+    const { getDocs, deleteDoc } = window.FirebaseFirestore;
     const snap = await getDocs(collection(firestore, "products"));
     for (const d of snap.docs) {
       if (!newProducts.find(p => String(p.id) === d.id)) {
-        const { deleteDoc } = window.FirebaseFirestore;
         await deleteDoc(doc(firestore, "products", d.id));
       }
     }
@@ -2327,12 +4140,16 @@ function App() {
     <div style={{ fontFamily: SANS }}>
       <style>{`${FONTS} * { box-sizing: border-box; }`}</style>
       <AdminDashboard
-        settings={settings} products={products} cats={cats} orders={myOrders}
+        settings={settings} products={products} cats={cats} orders={allOrders} members={allMembers}
         onUpdateSettings={saveSettings}
         onUpdateProducts={saveProducts}
         onUpdateCats={saveCats}
         onUpdateOrderStatus={updateOrderStatus}
         onUpdateOrderNote={updateOrderNote}
+        onDeleteOrder={deleteOrder}
+        onUpdatePoints={updateMemberPoints}
+        onResetPassword={resetMemberPassword}
+        onApplyStockRepair={applyStockRepair}
         onLogout={() => { setAdminMode(false); setAdminAuthed(false); }}
       />
     </div>
@@ -2352,19 +4169,26 @@ function App() {
     </div>
   );
 
-  const showNav = ["home","orders"].includes(screen);
+  if (showMemberAuth) return (
+    <div style={{ background: C.bg, minHeight: "100vh", fontFamily: SANS }}>
+      <style>{`${FONTS} * { box-sizing: border-box; }`}</style>
+      <MemberAuth settings={settings} db={db} onAuthed={loginMember} onBack={() => setShowMemberAuth(false)} />
+    </div>
+  );
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", fontFamily: SANS }}>
       <style>{`${FONTS} * { box-sizing: border-box; } body { background-color: #FEFEF2; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Crect width='56' height='56' fill='%23FEFEF2'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23DEF3FC' stroke-width='22' stroke-opacity='0.7'/%3E%3Cline x1='0' y1='28' x2='28' y2='0' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='56' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='0' y1='28' x2='28' y2='56' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3Cline x1='28' y1='0' x2='56' y2='28' stroke='%23FFEBEB' stroke-width='4' stroke-opacity='0.8'/%3E%3C/svg%3E"); } ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-thumb{background:${C.line};border-radius:4px;}`}</style>
 
-      {screen === "home"     && <ShopHome settings={settings} products={products} cats={cats} cart={cart} onAddToCart={addToCart} onChangeQty={changeQty} onGoCart={() => setScreen("cart")} onGoAdmin={() => setAdminMode(true)} onPolicyClick={setPolicyPage} />}
-      {screen === "cart"     && <CartScreen settings={settings} products={products} cart={cart} onBack={() => setScreen("home")} onGoCheckout={() => setScreen("checkout")} onChangeQty={changeQty} />}
-      {screen === "checkout" && <CheckoutScreen settings={settings} products={products} cart={cart} onBack={() => setScreen("cart")} onPlaceOrder={placeOrder} />}
+      {screen === "home"     && <ShopHome settings={settings} products={products} cats={cats} cart={cart} onAddToCart={addToCart} onChangeQty={changeQty} onAddVariant={addVariantToCart} onChangeQtyVariant={changeQtyVariant} onGoCart={() => setScreen("cart")} onGoAdmin={() => setAdminMode(true)} onPolicyClick={setPolicyPage} member={member} onGoMemberAuth={() => member ? setScreen("orders") : setShowMemberAuth(true)} onLogoutMember={logoutMember} onDetailChange={setInProductDetail} onGoHome={() => setScreen("home")} />}
+      {screen === "cart"     && <CartScreen settings={settings} products={products} cart={cart} member={member} onBack={() => setScreen("home")} onGoCheckout={() => member ? setScreen("checkout") : setShowMemberAuth(true)} onChangeQty={changeQty} onChangeQtyVariant={changeQtyVariant} onGoHome={() => setScreen("home")} onGoMemberAuth={() => member ? setScreen("orders") : setShowMemberAuth(true)} />}
+      {screen === "checkout" && <CheckoutScreen settings={settings} products={products} cart={cart} member={member} onBack={() => setScreen("cart")} onPlaceOrder={placeOrder} />}
       {screen === "success"  && lastOrder && <SuccessScreen settings={settings} order={lastOrder} onContinue={() => setScreen("home")} onViewOrders={() => setScreen("orders")} onPolicyClick={setPolicyPage} onGoAdmin={() => setAdminMode(true)} />}
-      {screen === "orders"   && <MyOrdersScreen settings={settings} orders={myOrders} cart={cart} onBack={() => setScreen("home")} onPolicyClick={setPolicyPage} onGoAdmin={() => setAdminMode(true)} />}
-
-      {showNav && <BottomNav active={screen} onHome={() => setScreen("home")} onCart={() => setScreen("cart")} onOrders={() => setScreen("orders")} cartCount={cartCount} />}
+      {screen === "orders"   && (member
+        ? <MemberScreen settings={settings} member={member} orders={myOrders} cart={cart} onBack={() => setScreen("home")} onPolicyClick={setPolicyPage} onGoAdmin={() => setAdminMode(true)} onViewOrder={o => { setSelectedOrder(o); setScreen("orderDetail"); }} onLogout={() => { logoutMember(); }} onUpdateMember={updateMemberProfile} onGoHome={() => setScreen("home")} onChangePassword={changeOwnPassword} />
+        : <MemberAuth settings={settings} db={db} onAuthed={loginMember} onBack={() => setScreen("home")} />
+      )}
+      {screen === "orderDetail" && selectedOrder && <OrderDetailScreen settings={settings} order={selectedOrder} cart={cart} onBack={() => setScreen("orders")} />}
     </div>
   );
 }
